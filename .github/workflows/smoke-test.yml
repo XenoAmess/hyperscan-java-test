@@ -71,10 +71,9 @@ jobs:
       - name: Print CPU flags
         if: matrix.os == 'linux'
         run: |
-          echo "CPU model:"
-          grep -m1 'model name' /proc/cpuinfo
-          echo "Flags:"
-          grep -m1 '^flags' /proc/cpuinfo || grep -m1 '^Features' /proc/cpuinfo
+          echo "CPU info:"
+          grep -m1 'model name' /proc/cpuinfo || true
+          grep -m1 '^flags' /proc/cpuinfo || grep -m1 '^Features' /proc/cpuinfo || true
 
       - name: Run smoke tests for ${{ matrix.platform }}
         run: |
