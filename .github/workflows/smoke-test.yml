@@ -68,6 +68,14 @@ jobs:
           VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x6' }}"
           echo "nativeVersion=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Print CPU flags
+        if: matrix.os == 'linux'
+        run: |
+          echo "CPU model:"
+          grep -m1 'model name' /proc/cpuinfo
+          echo "Flags:"
+          grep -m1 '^flags' /proc/cpuinfo || grep -m1 '^Features' /proc/cpuinfo
+
       - name: Run smoke tests for ${{ matrix.platform }}
         run: |
           set -euo pipefail
