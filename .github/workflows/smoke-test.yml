@@ -115,7 +115,7 @@ jobs:
           echo "Smoke tests for ${{ matrix.platform }} skipped due to missing CPU features."
 
       - name: Upload test reports
-        if: always()
+        if: always() && steps.cpu-check.outputs.SKIPPED != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: surefire-reports-${{ matrix.platform }}
