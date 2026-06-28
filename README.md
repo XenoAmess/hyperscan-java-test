@@ -25,13 +25,13 @@ across supported platforms and instruction-set tiers.
 mvn test
 ```
 
-Force a specific ISA tier (uses the base platform for JavaCPP, then loads the requested hyperscan variant):
+Force a specific ISA tier:
 
 ```bash
-mvn test -Dhs.platform=linux-x86_64-baseline
+mvn test -Djavacpp.platform=linux-x86_64-baseline
 ```
 
-Available `hs.platform` values:
+Available `javacpp.platform` values:
 - `linux-x86_64-baseline`
 - `linux-x86_64-avx2`
 - `linux-x86_64`
@@ -43,7 +43,7 @@ Available `hs.platform` values:
 Test a different native artifact version:
 
 ```bash
-mvn test -Dnative.version=5.4.12-2.0.4-x6 -Dhs.platform=linux-x86_64
+mvn test -Dnative.version=5.4.12-2.0.4-x6 -Djavacpp.platform=linux-x86_64
 ```
 
 ## CI

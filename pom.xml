@@ -39,6 +39,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <native.version>5.4.12-2.0.4-x6</native.version>
         <javacpp.version>1.5.12</javacpp.version>
+        <javacpp.platform>${os.detected.classifier}</javacpp.platform>
     </properties>
 
     <build>
@@ -67,7 +68,7 @@
                     <reuseForks>false</reuseForks>
                     <argLine>--enable-native-access=ALL-UNNAMED</argLine>
                     <systemPropertyVariables>
-                        <hs.platform>${hs.platform}</hs.platform>
+                        <org.bytedeco.javacpp.platform>${javacpp.platform}</org.bytedeco.javacpp.platform>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
