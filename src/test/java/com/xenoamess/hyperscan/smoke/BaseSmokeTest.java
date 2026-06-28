@@ -10,8 +10,11 @@ public abstract class BaseSmokeTest {
     @BeforeAll
     static void loadNativeLibrary() {
         String hsPlatform = System.getProperty("hs.platform");
+        System.out.println("BaseSmokeTest hs.platform=" + hsPlatform);
+        System.out.println("BaseSmokeTest org.bytedeco.javacpp.platform before=" + System.getProperty("org.bytedeco.javacpp.platform"));
         if (hsPlatform == null || hsPlatform.isEmpty()) {
             HyperscanNativeLoader.load();
+            System.out.println("BaseSmokeTest loaded default, platform after=" + System.getProperty("org.bytedeco.javacpp.platform"));
             return;
         }
 
@@ -20,6 +23,7 @@ public abstract class BaseSmokeTest {
             originalPlatform = Loader.getPlatform();
             System.setProperty("org.bytedeco.javacpp.platform", originalPlatform);
         }
+        System.out.println("BaseSmokeTest originalPlatform=" + originalPlatform);
 
         try (BytePointer ignored = new BytePointer(1)) {
             // Trigger loading of the JavaCPP core native library using the base platform.
@@ -27,7 +31,7 @@ public abstract class BaseSmokeTest {
 
         System.setProperty("org.bytedeco.javacpp.platform", hsPlatform);
         HyperscanNativeLoader.load();
-
         System.setProperty("org.bytedeco.javacpp.platform", hsPlatform);
+        System.out.println("BaseSmokeTest loaded variant, platform after=" + System.getProperty("org.bytedeco.javacpp.platform"));
     }
 }
