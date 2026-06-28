@@ -1,0 +1,83 @@
+name: smoke-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      nativeVersion:
+        description: 'Native artifact version to test (e.g. 5.4.12-2.0.4-x6)'
+        required: true
+        default: '5.4.12-2.0.4-x6'
+
+jobs:
+  smoke:
+    name: ${{ matrix.platform }} on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            platform: linux-x86_64-baseline
+          - os: linux
+            runner: ubuntu-24.04
+            platform: linux-x86_64-avx2
+          - os: linux
+            runner: ubuntu-24.04
+            platform: linux-x86_64
+          - os: linux
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64-baseline
+          - os: linux
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: windows
+            runner: windows-latest
+            platform: windows-x86_64-baseline
+          - os: windows
+            runner: windows-latest
+            platform: windows-x86_64
+
+    steps:
+      - name: Checkout test project
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up JDK
+        uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Resolve effective native version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x6' }}"
+          echo "nativeVersion=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Run smoke tests for ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          mvn -B test \
+            -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
+            -Dhs.platform=${{ matrix.platform }}
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: surefire-reports-${{ matrix.platform }}
+          path: target/surefire-reports/

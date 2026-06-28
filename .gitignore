@@ -1,0 +1,11 @@
+target/
+*.iml
+.idea/
+*.class
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+*.swo
+*~
