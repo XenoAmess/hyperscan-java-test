@@ -75,12 +75,44 @@ jobs:
           grep -m1 'model name' /proc/cpuinfo || true
           grep -m1 '^flags' /proc/cpuinfo || grep -m1 '^Features' /proc/cpuinfo || true
 
+      - name: Check CPU support for ${{ matrix.platform }}
+        if: matrix.os == 'linux'
+        id: cpu-check
+        run: |
+          PLATFORM="${{ matrix.platform }}"
+          case "$PLATFORM" in
+            linux-x86_64)
+              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx512f'; then
+                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::CPU does not support AVX-512; skipping $PLATFORM smoke tests."
+              fi
+              ;;
+            linux-x86_64-avx2)
+              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx2'; then
+                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::CPU does not support AVX2; skipping $PLATFORM smoke tests."
+              fi
+              ;;
+            linux-arm64)
+              if ! grep -m1 '^Features' /proc/cpuinfo | grep -qw 'sve2'; then
+                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::CPU does not support SVE2; skipping $PLATFORM smoke tests."
+              fi
+              ;;
+          esac
+
       - name: Run smoke tests for ${{ matrix.platform }}
+        if: steps.cpu-check.outputs.SKIPPED != 'true'
         run: |
           set -euo pipefail
           mvn -B test \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
             -Djavacpp.platform=${{ matrix.platform }}
+
+      - name: Skip smoke tests for ${{ matrix.platform }}
+        if: steps.cpu-check.outputs.SKIPPED == 'true'
+        run: |
+          echo "Smoke tests for ${{ matrix.platform }} skipped due to missing CPU features."
 
       - name: Upload test reports
         if: always()
