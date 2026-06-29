@@ -1,16 +1,16 @@
 package com.xenoamess.hyperscan.smoke;
 
-import com.xenoamess.hyperscan.jni.hs_compile_error_t;
-import com.xenoamess.hyperscan.jni.hs_database_t;
-import com.xenoamess.hyperscan.jni.hs_scratch_t;
-import com.xenoamess.hyperscan.jni.match_event_handler;
+import com.gliwka.hyperscan.jni.hs_compile_error_t;
+import com.gliwka.hyperscan.jni.hs_database_t;
+import com.gliwka.hyperscan.jni.hs_scratch_t;
+import com.gliwka.hyperscan.jni.match_event_handler;
 import org.bytedeco.javacpp.*;
 import org.bytedeco.javacpp.annotation.Cast;
 
 import java.util.ArrayList;
 import java.util.List;
 
-import static com.xenoamess.hyperscan.jni.hyperscan.*;
+import static com.gliwka.hyperscan.jni.hyperscan.*;
 
 public final class HyperscanTestHelper {
 

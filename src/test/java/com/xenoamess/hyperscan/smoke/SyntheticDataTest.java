@@ -1,6 +1,6 @@
 package com.xenoamess.hyperscan.smoke;
 
-import com.xenoamess.hyperscan.jni.hs_database_t;
+import com.gliwka.hyperscan.jni.hs_database_t;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -9,7 +9,7 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-import static com.xenoamess.hyperscan.jni.hyperscan.HS_FLAG_SOM_LEFTMOST;
+import static com.gliwka.hyperscan.jni.hyperscan.HS_FLAG_SOM_LEFTMOST;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class SyntheticDataTest extends BaseSmokeTest {
