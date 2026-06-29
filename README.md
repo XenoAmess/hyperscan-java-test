@@ -43,7 +43,7 @@ Available `javacpp.platform` values:
 Test a different native artifact version:
 
 ```bash
-mvn test -Dnative.version=5.4.12-2.0.4-x6 -Djavacpp.platform=linux-x86_64
+mvn test -Dnative.version=5.4.12-2.0.4-x7 -Djavacpp.platform=linux-x86_64
 ```
 
 ## CI

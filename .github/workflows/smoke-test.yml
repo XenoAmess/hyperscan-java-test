@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       nativeVersion:
-        description: 'Native artifact version to test (e.g. 5.4.12-2.0.4-x6)'
+        description: 'Native artifact version to test (e.g. 5.4.12-2.0.4-x7)'
         required: true
-        default: '5.4.12-2.0.4-x6'
+        default: '5.4.12-2.0.4-x7'
 
 jobs:
   smoke:
@@ -65,7 +65,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x6' }}"
+          VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}"
           echo "nativeVersion=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Print CPU flags
