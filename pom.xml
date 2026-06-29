@@ -38,7 +38,7 @@
         <maven.compiler.target>1.8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <native.version>5.4.12-2.0.4-x7</native.version>
-        <javacpp.version>1.5.12</javacpp.version>
+        <javacpp.version>1.5.13</javacpp.version>
         <javacpp.platform>${os.detected.classifier}</javacpp.platform>
     </properties>
 
