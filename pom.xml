@@ -10,7 +10,7 @@
     <packaging>jar</packaging>
 
     <name>hyperscan-java-test</name>
-    <description>Smoke tests for hyperscan-java-native across platforms and ISA tiers</description>
+    <description>Smoke tests for hyperscan-java-native and hyperscan-java wrapper across platforms and ISA tiers</description>
     <url>https://github.com/XenoAmess/hyperscan-java-test</url>
 
     <licenses>
@@ -72,10 +72,109 @@
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
+            <!--
+                The shade plugin requires the project main artifact to exist. We jar
+                the (empty) main classes early in process-classes so that the shade
+                plugin can run in generate-test-resources, producing a relocated
+                copy of the wrapper before test-compile runs.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>default-jar</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>early-main-jar</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+                Relocate the upstream hyperscan-java wrapper so that its
+                com.gliwka.hyperscan.jni references become com.xenoamess.hyperscan.jni,
+                matching the modified native artifacts' JNI symbols.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <id>relocate-wrapper-for-tests</id>
+                        <phase>generate-test-resources</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/relocated-wrapper.jar</outputFile>
+                            <artifactSet>
+                                <includes>
+                                    <include>com.gliwka.hyperscan:hyperscan</include>
+                                </includes>
+                            </artifactSet>
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.gliwka.hyperscan.jni</pattern>
+                                    <shadedPattern>com.xenoamess.hyperscan.jni</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+                Unpack the relocated wrapper into target/test-classes so that the
+                high-level wrapper classes are available at test compile time and runtime.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>unpack-relocated-wrapper</id>
+                        <phase>process-test-resources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <mkdir dir="${project.build.directory}/test-classes"/>
+                                <unzip src="${project.build.directory}/relocated-wrapper.jar" dest="${project.build.directory}/test-classes"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
     <dependencies>
+        <!-- High-level hyperscan-java wrapper -->
+        <dependency>
+            <groupId>com.gliwka.hyperscan</groupId>
+            <artifactId>hyperscan</artifactId>
+            <version>5.4.11-3.1.0</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.gliwka.hyperscan</groupId>
+                    <artifactId>native</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!--
+            Modified native artifacts used by the original low-level smoke tests
+            and by the relocated hyperscan-java wrapper.
+        -->
         <dependency>
             <groupId>com.xenoamess.hyperscan</groupId>
             <artifactId>native</artifactId>
@@ -123,6 +222,7 @@
                 </exclusion>
             </exclusions>
         </dependency>
+
         <dependency>
             <groupId>org.bytedeco</groupId>
             <artifactId>javacpp</artifactId>
