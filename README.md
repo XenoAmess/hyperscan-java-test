@@ -5,6 +5,8 @@ across supported platforms and instruction-set tiers.
 
 📊 **[View latest performance report](https://xenoamess.github.io/hyperscan-java-test/)**
 
+![Latest performance summary](https://xenoamess.github.io/hyperscan-java-test/performance-summary.svg)
+
 ## What is tested
 
 - Native library loading and platform selection
