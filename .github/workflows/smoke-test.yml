@@ -48,11 +48,13 @@ jobs:
       NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}
       GITHUB_SHA: ${{ github.sha }}
       RUNNER_OS: ${{ matrix.os }}
-      RUNNER_ARCH: ${{ runner.arch }}
       CPU_MODEL: unknown
       CPU_FLAGS: unknown
 
     steps:
+      - name: Set runner architecture
+        run: echo "RUNNER_ARCH=${{ runner.arch }}" >> "$GITHUB_ENV"
+
       - name: Checkout test project
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
