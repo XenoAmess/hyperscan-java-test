@@ -3,6 +3,8 @@
 Smoke tests for [hyperscan-java-native](https://github.com/XenoAmess/hyperscan-java-native)
 across supported platforms and instruction-set tiers.
 
+📊 **[View latest performance report](https://xenoamess.github.io/hyperscan-java-test/)**
+
 ## What is tested
 
 - Native library loading and platform selection
@@ -50,3 +52,7 @@ mvn test -Dnative.version=5.4.12-2.0.4-x7 -Djavacpp.platform=linux-x86_64
 
 GitHub Actions runs the full matrix on every push/PR and can be triggered
 manually with a selectable native version.
+
+A detailed cross-platform performance report is generated and published to
+[GitHub Pages](https://xenoamess.github.io/hyperscan-java-test/) on every push
+to `master`.

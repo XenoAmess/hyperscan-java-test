@@ -11,6 +11,15 @@ on:
         required: true
         default: '5.4.12-2.0.4-x7'
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
 jobs:
   smoke:
     name: ${{ matrix.platform }} on ${{ matrix.runner }}
@@ -185,3 +194,26 @@ jobs:
           name: performance-report
           path: target/performance-report/
           if-no-files-found: error
+
+      - name: Configure GitHub Pages
+        if: github.ref == 'refs/heads/master'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/master'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/performance-report/
+
+  deploy:
+    name: Deploy performance report to Pages
+    needs: report
+    runs-on: ubuntu-24.04
+    if: always() && !cancelled() && needs.report.result == 'success' && github.ref == 'refs/heads/master'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
