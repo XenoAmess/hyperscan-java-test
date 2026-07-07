@@ -162,7 +162,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Download all benchmark raw results
-        uses: actions/download-artifact@d3f86fb106823547824188dd0c2f2f1023f94626
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: benchmark-raw
           pattern: benchmark-raw-*
