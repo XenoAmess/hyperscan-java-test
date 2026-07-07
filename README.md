@@ -5,7 +5,7 @@ across supported platforms and instruction-set tiers.
 
 📊 **[View latest performance report](https://xenoamess.github.io/hyperscan-java-test/)**
 
-![Latest performance summary](https://xenoamess.github.io/hyperscan-java-test/performance-summary.svg)
+[![Latest performance summary](https://xenoamess.github.io/hyperscan-java-test/performance-summary.svg)](https://xenoamess.github.io/hyperscan-java-test/)
 
 ## What is tested
 
