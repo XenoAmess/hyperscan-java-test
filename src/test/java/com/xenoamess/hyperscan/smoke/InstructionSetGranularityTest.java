@@ -13,8 +13,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class InstructionSetGranularityTest extends BaseSmokeTest {
 
+    private static final int WARMUP_ITERATIONS = 2;
+    private static final int MEASURED_ITERATIONS = 5;
+
     @Test
-    void benchmarkReport() {
+    void benchmarkReport() throws Exception {
         String platform = System.getProperty("org.bytedeco.javacpp.platform");
         System.out.println("=== ISA granularity benchmark on platform: " + platform + " ===");
 
@@ -30,20 +33,95 @@ class InstructionSetGranularityTest extends BaseSmokeTest {
         try {
             String input = buildMixedInput(20_000, 50);
 
-            long start = System.nanoTime();
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, input);
-            long elapsed = System.nanoTime() - start;
+            for (int i = 0; i < WARMUP_ITERATIONS; i++) {
+                HyperscanTestHelper.hsScan(db, input);
+            }
+
+            double[] throughputs = new double[MEASURED_ITERATIONS];
+            double[] elapsedMs = new double[MEASURED_ITERATIONS];
+            List<HyperscanTestHelper.Match> matches = null;
+            for (int i = 0; i < MEASURED_ITERATIONS; i++) {
+                long start = System.nanoTime();
+                matches = HyperscanTestHelper.hsScan(db, input);
+                long elapsed = System.nanoTime() - start;
+                elapsedMs[i] = elapsed / 1_000_000.0;
+                throughputs[i] = input.length() * 1_000.0 / elapsed;
+            }
+
+            double avgElapsedMs = avg(elapsedMs);
+            double minElapsedMs = min(elapsedMs);
+            double maxElapsedMs = max(elapsedMs);
+            double avgThroughput = avg(throughputs);
+            double minThroughput = min(throughputs);
+            double maxThroughput = max(throughputs);
 
             System.out.println("Patterns: " + patterns.length);
             System.out.println("Input bytes: " + input.length());
             System.out.println("Matches: " + matches.size());
-            System.out.println("Elapsed ms: " + (elapsed / 1_000_000.0));
-            System.out.println("Throughput MB/s: " + (input.length() * 1_000.0 / elapsed));
+            System.out.println("Elapsed ms (avg/min/max): " + avgElapsedMs + "/" + minElapsedMs + "/" + maxElapsedMs);
+            System.out.println("Throughput MB/s (avg/min/max): " + avgThroughput + "/" + minThroughput + "/" + maxThroughput);
 
             assertThat(matches).isNotNull();
+
+            BenchmarkResult result = new BenchmarkResult("ISA granularity benchmark")
+                    .metric("patterns", patterns.length)
+                    .metric("inputBytes", input.length())
+                    .metric("matches", matches.size())
+                    .metric("iterations", MEASURED_ITERATIONS)
+                    .metric("elapsedMsAvg", avgElapsedMs)
+                    .metric("elapsedMsMin", minElapsedMs)
+                    .metric("elapsedMsMax", maxElapsedMs)
+                    .metric("throughputMBpsAvg", avgThroughput)
+                    .metric("throughputMBpsMin", minThroughput)
+                    .metric("throughputMBpsMax", maxThroughput);
+
+            BenchmarkRecorder recorder = new BenchmarkRecorder(
+                    platform,
+                    env("NATIVE_VERSION", "unknown"),
+                    env("GITHUB_SHA", "unknown"),
+                    env("RUNNER_OS", "unknown"),
+                    env("RUNNER_ARCH", "unknown"),
+                    env("CPU_MODEL", "unknown"),
+                    env("CPU_FLAGS", "unknown"),
+                    java.util.Collections.singletonList(result)
+            );
+            recorder.write();
         } finally {
             HyperscanTestHelper.freeDatabase(db);
         }
+    }
+
+    private static String env(String name, String defaultValue) {
+        String value = System.getenv(name);
+        return value == null ? defaultValue : value;
+    }
+
+    private static double avg(double[] values) {
+        double sum = 0.0;
+        for (double v : values) {
+            sum += v;
+        }
+        return sum / values.length;
+    }
+
+    private static double min(double[] values) {
+        double min = Double.MAX_VALUE;
+        for (double v : values) {
+            if (v < min) {
+                min = v;
+            }
+        }
+        return min;
+    }
+
+    private static double max(double[] values) {
+        double max = -Double.MAX_VALUE;
+        for (double v : values) {
+            if (v > max) {
+                max = v;
+            }
+        }
+        return max;
     }
 
     private String[] buildMixedPatterns(int count) {

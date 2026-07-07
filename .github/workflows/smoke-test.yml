@@ -44,6 +44,14 @@ jobs:
             runner: windows-latest
             platform: windows-x86_64
 
+    env:
+      NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}
+      GITHUB_SHA: ${{ github.sha }}
+      RUNNER_OS: ${{ matrix.os }}
+      RUNNER_ARCH: ${{ runner.arch }}
+      CPU_MODEL: unknown
+      CPU_FLAGS: unknown
+
     steps:
       - name: Checkout test project
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -68,12 +76,25 @@ jobs:
           VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}"
           echo "nativeVersion=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Print CPU flags
+      - name: Collect CPU information (Linux)
         if: matrix.os == 'linux'
         run: |
-          echo "CPU info:"
-          grep -m1 'model name' /proc/cpuinfo || true
-          grep -m1 '^flags' /proc/cpuinfo || grep -m1 '^Features' /proc/cpuinfo || true
+          MODEL=$(grep -m1 'model name' /proc/cpuinfo | sed 's/^.*: //' || echo 'unknown')
+          FLAGS=$(grep -m1 '^flags' /proc/cpuinfo | sed 's/^.*: //' || grep -m1 '^Features' /proc/cpuinfo | sed 's/^.*: //' || echo 'unknown')
+          echo "CPU_MODEL=$MODEL" >> "$GITHUB_ENV"
+          echo "CPU_FLAGS=$FLAGS" >> "$GITHUB_ENV"
+          echo "CPU model: $MODEL"
+          echo "CPU flags: $FLAGS"
+
+      - name: Collect CPU information (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $model = (Get-CimInstance Win32_Processor).Name
+          if (-not $model) { $model = 'unknown' }
+          "CPU_MODEL=$model" >> $env:GITHUB_ENV
+          "CPU_FLAGS=unknown" >> $env:GITHUB_ENV
+          Write-Host "CPU model: $model"
 
       - name: Check CPU support for ${{ matrix.platform }}
         if: matrix.os == 'linux'
@@ -120,3 +141,45 @@ jobs:
         with:
           name: surefire-reports-${{ matrix.platform }}
           path: target/surefire-reports/
+
+      - name: Upload benchmark raw result
+        if: always() && steps.cpu-check.outputs.SKIPPED != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: benchmark-raw-${{ matrix.platform }}
+          path: target/benchmark-results/benchmark-result.json
+          if-no-files-found: warn
+
+  report:
+    name: Aggregate performance report
+    needs: smoke
+    runs-on: ubuntu-24.04
+    if: always() && !cancelled() && needs.smoke.result != 'skipped'
+    steps:
+      - name: Checkout test project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Download all benchmark raw results
+        uses: actions/download-artifact@d3f86fb106823547824188dd0c2f2f1023f94626
+        with:
+          path: benchmark-raw
+          pattern: benchmark-raw-*
+
+      - name: Generate performance report
+        run: |
+          python3 .github/scripts/generate-performance-report.py \
+            benchmark-raw \
+            target/performance-report/index.html \
+            "${NATIVE_VERSION}" \
+            "${GITHUB_SHA}"
+        env:
+          NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: Upload performance report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: performance-report
+          path: target/performance-report/
+          if-no-files-found: error
