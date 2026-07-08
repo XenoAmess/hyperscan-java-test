@@ -1,11 +1,11 @@
 package com.xenoamess.hyperscan.smoke;
 
 import com.gliwka.hyperscan.jni.hs_database_t;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Random;
-import java.util.UUID;
 import java.util.regex.Pattern;
 
 import static com.gliwka.hyperscan.jni.hyperscan.HS_FLAG_SOM_LEFTMOST;
@@ -15,6 +15,29 @@ class InstructionSetGranularityTest extends BaseSmokeTest {
 
     private static final int WARMUP_ITERATIONS = 2;
     private static final int MEASURED_ITERATIONS = 5;
+    private static final int GLOBAL_WARMUP_ITERATIONS = 20;
+
+    @BeforeAll
+    static void globalWarmUp() throws Exception {
+        String[] patterns = buildMixedPatterns(500);
+        int[] ids = new int[patterns.length];
+        int[] flags = new int[patterns.length];
+        for (int i = 0; i < patterns.length; i++) {
+            ids[i] = i;
+            flags[i] = HS_FLAG_SOM_LEFTMOST;
+        }
+        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
+        try {
+            String input = buildMixedInput(20_000, 50);
+            int matches = 0;
+            for (int i = 0; i < GLOBAL_WARMUP_ITERATIONS; i++) {
+                matches = HyperscanTestHelper.hsScan(db, input).size();
+            }
+            System.out.println("Warm-up matches: " + matches);
+        } finally {
+            HyperscanTestHelper.freeDatabase(db);
+        }
+    }
 
     @Test
     void benchmarkReport() throws Exception {
@@ -124,22 +147,24 @@ class InstructionSetGranularityTest extends BaseSmokeTest {
         return max;
     }
 
-    private String[] buildMixedPatterns(int count) {
+    private static String[] buildMixedPatterns(int count) {
         String[] patterns = new String[count];
         patterns[0] = "[0-9]{3}-[0-9]{2}-[0-9]{4}";
         patterns[1] = "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}";
         patterns[2] = "https?://[^\\s]+";
         patterns[3] = "\\bERROR\\b";
         patterns[4] = "\\bWARNING\\b";
+        Random random = new Random(2027);
         for (int i = 5; i < count; i++) {
-            String token = UUID.randomUUID().toString().substring(0, 8);
+            String token = String.format("%08x", random.nextInt());
             patterns[i] = Pattern.quote("TOKEN_" + token);
         }
         return patterns;
     }
 
-    private String buildMixedInput(int size, int seedCount) {
+    private static String buildMixedInput(int size, int seedCount) {
         Random random = new Random(2026);
+        Random tokenRandom = new Random(2027);
         StringBuilder sb = new StringBuilder(size);
         String[] fragments = {
                 "Contact support@example.com for help. ",
@@ -150,7 +175,7 @@ class InstructionSetGranularityTest extends BaseSmokeTest {
         };
         while (sb.length() < size) {
             if (random.nextInt(10) == 0 && seedCount > 0) {
-                sb.append("TOKEN_").append(UUID.randomUUID().toString().substring(0, 8)).append(" ");
+                sb.append("TOKEN_").append(String.format("%08x", tokenRandom.nextInt())).append(" ");
                 seedCount--;
             } else {
                 sb.append(fragments[random.nextInt(fragments.length)]);

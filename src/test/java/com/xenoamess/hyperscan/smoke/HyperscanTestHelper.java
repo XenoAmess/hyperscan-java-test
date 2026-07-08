@@ -44,6 +44,20 @@ public final class HyperscanTestHelper {
         return databasePtr.get(hs_database_t.class);
     }
 
+    private static final ThreadLocal<List<Match>> CURRENT_MATCHES = ThreadLocal.withInitial(ArrayList::new);
+
+    private static final match_event_handler HANDLER = new match_event_handler() {
+        @Override
+        public int call(@Cast("unsigned int") int id,
+                        @Cast("unsigned long long") long from,
+                        @Cast("unsigned long long") long to,
+                        @Cast("unsigned int") int flags,
+                        Pointer context) {
+            CURRENT_MATCHES.get().add(new Match(id, from, to));
+            return 0;
+        }
+    };
+
     public static List<Match> hsScan(hs_database_t database, String input) {
         hs_scratch_t scratch = new hs_scratch_t();
         int allocResult = hs_alloc_scratch(database, scratch);
@@ -51,25 +65,20 @@ public final class HyperscanTestHelper {
             throw new AssertionError("hs_alloc_scratch failed: " + allocResult);
         }
 
-        List<Match> matches = new ArrayList<>();
-        match_event_handler handler = new match_event_handler() {
-            @Override
-            public int call(@Cast("unsigned int") int id,
-                            @Cast("unsigned long long") long from,
-                            @Cast("unsigned long long") long to,
-                            @Cast("unsigned int") int flags,
-                            Pointer context) {
-                matches.add(new Match(id, from, to));
-                return 0;
-            }
-        };
+        List<Match> matches = CURRENT_MATCHES.get();
+        matches.clear();
 
-        int scanResult = hs_scan(database, input, input.length(), 0, scratch, handler, null);
+        int scanResult = hs_scan(database, input, input.length(), 0, scratch, HANDLER, null);
         if (scanResult != 0) {
             throw new AssertionError("hs_scan failed: " + scanResult);
         }
 
-        return matches;
+        int freeResult = hs_free_scratch(scratch);
+        if (freeResult != 0) {
+            throw new AssertionError("hs_free_scratch failed: " + freeResult);
+        }
+
+        return new ArrayList<>(matches);
     }
 
     public static void freeDatabase(hs_database_t database) {
