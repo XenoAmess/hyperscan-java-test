@@ -16,10 +16,6 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
-
 jobs:
   smoke:
     name: ${{ matrix.platform }} on ${{ matrix.runner }}
@@ -166,7 +162,7 @@ jobs:
     name: Aggregate performance report
     needs: smoke
     runs-on: ubuntu-24.04
-    if: always() && !cancelled() && needs.smoke.result != 'skipped'
+    if: always() && !cancelled() && needs.smoke.result == 'success'
     steps:
       - name: Checkout test project
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -221,6 +217,9 @@ jobs:
     name: Deploy performance report to Pages
     needs: report
     runs-on: ubuntu-24.04
+    concurrency:
+      group: github-pages-deploy
+      cancel-in-progress: false
     if: always() && !cancelled() && needs.report.result == 'success' && github.ref == 'refs/heads/master'
     environment:
       name: github-pages
