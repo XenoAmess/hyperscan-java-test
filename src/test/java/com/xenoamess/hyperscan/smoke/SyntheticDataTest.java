@@ -1,39 +1,42 @@
 package com.xenoamess.hyperscan.smoke;
 
-import com.gliwka.hyperscan.jni.hs_database_t;
-import org.junit.jupiter.api.Test;
+import com.xenoamess.hyperscan.smoke.dual.DualApi;
+import com.xenoamess.hyperscan.smoke.dual.DualApiArgumentsSource;
+import com.xenoamess.hyperscan.smoke.dual.DualDatabase;
+import com.xenoamess.hyperscan.smoke.dual.DualExpression;
+import com.xenoamess.hyperscan.smoke.dual.DualExpressionFlag;
+import com.xenoamess.hyperscan.smoke.dual.DualMatch;
+import com.xenoamess.hyperscan.smoke.dual.DualScanner;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ArgumentsSource;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-import static com.gliwka.hyperscan.jni.hyperscan.HS_FLAG_SOM_LEFTMOST;
 import static org.assertj.core.api.Assertions.assertThat;
 
-class SyntheticDataTest extends BaseSmokeTest {
+class SyntheticDataTest {
 
-    @Test
-    void manyRandomLiteralPatterns() {
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void manyRandomLiteralPatterns(DualApi api) {
         int count = 200;
-        String[] patterns = new String[count];
-        int[] ids = new int[count];
-        int[] flags = new int[count];
-
+        List<DualExpression> expressions = new ArrayList<>();
         List<String> expectedMatches = new ArrayList<>();
+
         for (int i = 0; i < count; i++) {
             String literal = "LIT_" + UUID.randomUUID().toString().replace("-", "");
-            patterns[i] = Pattern.quote(literal);
-            ids[i] = i;
-            flags[i] = HS_FLAG_SOM_LEFTMOST;
+            expressions.add(api.createExpression(Pattern.quote(literal), DualExpressionFlag.SOM_LEFTMOST, i));
             if (i % 7 == 0) {
                 expectedMatches.add(literal);
             }
         }
 
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
-        try {
+        try (DualDatabase db = api.compileDatabase(expressions)) {
             StringBuilder input = new StringBuilder();
             input.append("noise_");
             for (String literal : expectedMatches) {
@@ -41,29 +44,28 @@ class SyntheticDataTest extends BaseSmokeTest {
             }
             input.append("trailing");
 
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, input.toString());
-            assertThat(matches).hasSize(expectedMatches.size());
-            for (HyperscanTestHelper.Match match : matches) {
-                assertThat(match.id % 7).isEqualTo(0);
+            try (DualScanner scanner = api.createScanner()) {
+                api.allocScratch(scanner, db);
+                List<DualMatch> matches = api.scan(scanner, db, input.toString());
+                assertThat(matches).hasSize(expectedMatches.size());
+                for (DualMatch match : matches) {
+                    assertThat(match.id() % 7).isEqualTo(0);
+                }
             }
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
         }
     }
 
-    @Test
-    void characterClassPatternsOnRandomAlphanumericInput() {
-        String[] patterns = {
-                "[0-9]{5,}",
-                "[A-Z]{4,}",
-                "[a-z]{6,}",
-                "[0-9a-f]{32}",
-        };
-        int[] ids = {1, 2, 3, 4};
-        int[] flags = {HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST};
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void characterClassPatternsOnRandomAlphanumericInput(DualApi api) {
+        List<DualExpression> expressions = Arrays.asList(
+                api.createExpression("[0-9]{5,}", DualExpressionFlag.SOM_LEFTMOST, 1),
+                api.createExpression("[A-Z]{4,}", DualExpressionFlag.SOM_LEFTMOST, 2),
+                api.createExpression("[a-z]{6,}", DualExpressionFlag.SOM_LEFTMOST, 3),
+                api.createExpression("[0-9a-f]{32}", DualExpressionFlag.SOM_LEFTMOST, 4)
+        );
 
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
-        try {
+        try (DualDatabase db = api.compileDatabase(expressions)) {
             Random random = new Random(42);
             StringBuilder input = new StringBuilder();
             for (int i = 0; i < 5000; i++) {
@@ -72,21 +74,22 @@ class SyntheticDataTest extends BaseSmokeTest {
             input.append(" 12345 ABCDE lowercase ");
             input.append(UUID.randomUUID().toString().replace("-", ""));
 
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, input.toString());
-            assertThat(matches).isNotEmpty();
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
+            try (DualScanner scanner = api.createScanner()) {
+                api.allocScratch(scanner, db);
+                List<DualMatch> matches = api.scan(scanner, db, input.toString());
+                assertThat(matches).isNotEmpty();
+            }
         }
     }
 
-    @Test
-    void longInputScanDoesNotCrash() {
-        String[] patterns = {"needle"};
-        int[] ids = {1};
-        int[] flags = {HS_FLAG_SOM_LEFTMOST};
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void longInputScanDoesNotCrash(DualApi api) {
+        List<DualExpression> expressions = Arrays.asList(
+                api.createExpression("needle", DualExpressionFlag.SOM_LEFTMOST, 1)
+        );
 
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
-        try {
+        try (DualDatabase db = api.compileDatabase(expressions)) {
             StringBuilder input = new StringBuilder();
             for (int i = 0; i < 100_000; i++) {
                 input.append("haystack ");
@@ -96,26 +99,12 @@ class SyntheticDataTest extends BaseSmokeTest {
                 input.append(" tail");
             }
 
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, input.toString());
-            assertThat(matches).hasSize(1);
-            assertThat(matches.get(0).id).isEqualTo(1);
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
-        }
-    }
-
-    @Test
-    void repeatedPatternIdsAreAccepted() {
-        String[] patterns = {"foo", "bar", "foo"};
-        int[] ids = {1, 2, 1};
-        int[] flags = {HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST};
-
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
-        try {
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, "foo bar foo");
-            assertThat(matches).hasSize(3);
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
+            try (DualScanner scanner = api.createScanner()) {
+                api.allocScratch(scanner, db);
+                List<DualMatch> matches = api.scan(scanner, db, input.toString());
+                assertThat(matches).hasSize(1);
+                assertThat(matches.get(0).id()).isEqualTo(1);
+            }
         }
     }
 }

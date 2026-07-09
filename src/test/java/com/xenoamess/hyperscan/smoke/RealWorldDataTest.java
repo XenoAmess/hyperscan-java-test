@@ -1,15 +1,22 @@
 package com.xenoamess.hyperscan.smoke;
 
-import com.gliwka.hyperscan.jni.hs_database_t;
-import org.junit.jupiter.api.Test;
+import com.xenoamess.hyperscan.smoke.dual.DualApi;
+import com.xenoamess.hyperscan.smoke.dual.DualApiArgumentsSource;
+import com.xenoamess.hyperscan.smoke.dual.DualDatabase;
+import com.xenoamess.hyperscan.smoke.dual.DualExpression;
+import com.xenoamess.hyperscan.smoke.dual.DualExpressionFlag;
+import com.xenoamess.hyperscan.smoke.dual.DualMatch;
+import com.xenoamess.hyperscan.smoke.dual.DualScanner;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ArgumentsSource;
 
+import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.List;
 
-import static com.gliwka.hyperscan.jni.hyperscan.HS_FLAG_CASELESS;
-import static com.gliwka.hyperscan.jni.hyperscan.HS_FLAG_SOM_LEFTMOST;
 import static org.assertj.core.api.Assertions.assertThat;
 
-class RealWorldDataTest extends BaseSmokeTest {
+class RealWorldDataTest {
 
     private static final String HTTP_REQUEST =
             "GET /api/v1/users/12345/orders?limit=10 HTTP/1.1\r\n" +
@@ -33,88 +40,84 @@ class RealWorldDataTest extends BaseSmokeTest {
             "192.168.1.15 - - [28/Jun/2026:14:32:12 +0000] \"POST /login HTTP/1.1\" 401 142 \"-\" \"curl/8.0\"\n" +
             "10.0.0.5 - - [28/Jun/2026:14:32:13 +0000] \"GET /admin?cmd=ls%20-la HTTP/1.1\" 403 199 \"-\" \"python-requests/2.31\"\n";
 
-    @Test
-    void httpRequestPatterns() {
-        String[] patterns = {
-                "GET /api/",
-                "Host:",
-                "User-Agent:",
-                "Authorization: Bearer",
-                "203.0.113.42",
-        };
-        int[] ids = {1, 2, 3, 4, 5};
-        int[] flags = {HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST};
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void httpRequestPatterns(DualApi api) {
+        List<DualExpression> expressions = Arrays.asList(
+                api.createExpression("GET /api/", DualExpressionFlag.SOM_LEFTMOST, 1),
+                api.createExpression("Host:", DualExpressionFlag.SOM_LEFTMOST, 2),
+                api.createExpression("User-Agent:", DualExpressionFlag.SOM_LEFTMOST, 3),
+                api.createExpression("Authorization: Bearer", DualExpressionFlag.SOM_LEFTMOST, 4),
+                api.createExpression("203.0.113.42", DualExpressionFlag.SOM_LEFTMOST, 5)
+        );
 
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
-        try {
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, HTTP_REQUEST);
-            assertThat(matches).hasSizeGreaterThanOrEqualTo(4);
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
+        try (DualDatabase db = api.compileDatabase(expressions)) {
+            try (DualScanner scanner = api.createScanner()) {
+                api.allocScratch(scanner, db);
+                List<DualMatch> matches = api.scan(scanner, db, HTTP_REQUEST);
+                assertThat(matches).hasSizeGreaterThanOrEqualTo(4);
+            }
         }
     }
 
-    @Test
-    void httpResponsePatterns() {
-        String[] patterns = {
-                "HTTP/1.1 200",
-                "Set-Cookie:",
-                "application/json",
-                "charset=utf-8",
-        };
-        int[] ids = {1, 2, 3, 4};
-        int[] flags = {HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST};
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void httpResponsePatterns(DualApi api) {
+        List<DualExpression> expressions = Arrays.asList(
+                api.createExpression("HTTP/1.1 200", DualExpressionFlag.SOM_LEFTMOST, 1),
+                api.createExpression("Set-Cookie:", DualExpressionFlag.SOM_LEFTMOST, 2),
+                api.createExpression("application/json", DualExpressionFlag.SOM_LEFTMOST, 3),
+                api.createExpression("charset=utf-8", DualExpressionFlag.SOM_LEFTMOST, 4)
+        );
 
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
-        try {
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, HTTP_RESPONSE);
-            assertThat(matches).hasSizeGreaterThanOrEqualTo(3);
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
+        try (DualDatabase db = api.compileDatabase(expressions)) {
+            try (DualScanner scanner = api.createScanner()) {
+                api.allocScratch(scanner, db);
+                List<DualMatch> matches = api.scan(scanner, db, HTTP_RESPONSE);
+                assertThat(matches).hasSizeGreaterThanOrEqualTo(3);
+            }
         }
     }
 
-    @Test
-    void nginxLogPatterns() {
-        String[] patterns = {
-                "127.0.0.1",
-                "28/Jun/2026",
-                "GET /admin",
-                "403",
-        };
-        int[] ids = {1, 2, 3, 4};
-        int[] flags = {HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST};
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void nginxLogPatterns(DualApi api) {
+        List<DualExpression> expressions = Arrays.asList(
+                api.createExpression("127.0.0.1", DualExpressionFlag.SOM_LEFTMOST, 1),
+                api.createExpression("28/Jun/2026", DualExpressionFlag.SOM_LEFTMOST, 2),
+                api.createExpression("GET /admin", DualExpressionFlag.SOM_LEFTMOST, 3),
+                api.createExpression("403", DualExpressionFlag.SOM_LEFTMOST, 4)
+        );
 
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(patterns, ids, flags);
-        try {
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, NGINX_LOG);
-            assertThat(matches).isNotEmpty();
-            boolean hasAdminMatch = matches.stream().anyMatch(m -> m.id == 3);
-            assertThat(hasAdminMatch).isTrue();
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
+        try (DualDatabase db = api.compileDatabase(expressions)) {
+            try (DualScanner scanner = api.createScanner()) {
+                api.allocScratch(scanner, db);
+                List<DualMatch> matches = api.scan(scanner, db, NGINX_LOG);
+                assertThat(matches).isNotEmpty();
+                boolean hasAdminMatch = matches.stream().anyMatch(m -> m.id() == 3);
+                assertThat(hasAdminMatch).isTrue();
+            }
         }
     }
 
-    @Test
-    void simpleSecuritySignatures() {
-        String[] signatures = {
-                "cmd=",
-                "eval\\(",
-                "javascript:",
-                "\u003cscript",
-                "union select",
-        };
-        int[] ids = {1, 2, 3, 4, 5};
-        int[] flags = {HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST, HS_FLAG_SOM_LEFTMOST | HS_FLAG_CASELESS};
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void simpleSecuritySignatures(DualApi api) {
+        List<DualExpression> expressions = Arrays.asList(
+                api.createExpression("cmd=", DualExpressionFlag.SOM_LEFTMOST, 1),
+                api.createExpression("eval\\(", DualExpressionFlag.SOM_LEFTMOST, 2),
+                api.createExpression("javascript:", DualExpressionFlag.SOM_LEFTMOST, 3),
+                api.createExpression("\u003cscript", DualExpressionFlag.SOM_LEFTMOST, 4),
+                api.createExpression("union select", EnumSet.of(DualExpressionFlag.SOM_LEFTMOST, DualExpressionFlag.CASELESS), 5)
+        );
 
-        hs_database_t db = HyperscanTestHelper.hsCompileMulti(signatures, ids, flags);
-        try {
-            String suspiciousInput = "page=1\u0026cmd=ls%20-la\u0026q=\u003cscript\u003ealert(1)\u003c/script\u003e";
-            List<HyperscanTestHelper.Match> matches = HyperscanTestHelper.hsScan(db, suspiciousInput);
-            assertThat(matches).isNotEmpty();
-        } finally {
-            HyperscanTestHelper.freeDatabase(db);
+        try (DualDatabase db = api.compileDatabase(expressions)) {
+            try (DualScanner scanner = api.createScanner()) {
+                api.allocScratch(scanner, db);
+                String suspiciousInput = "page=1\u0026cmd=ls%20-la\u0026q=\u003cscript\u003ealert(1)\u003c/script\u003e";
+                List<DualMatch> matches = api.scan(scanner, db, suspiciousInput);
+                assertThat(matches).isNotEmpty();
+            }
         }
     }
 }

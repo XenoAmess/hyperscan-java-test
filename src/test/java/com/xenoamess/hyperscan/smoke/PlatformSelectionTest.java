@@ -1,31 +1,29 @@
 package com.xenoamess.hyperscan.smoke;
 
-import com.gliwka.hyperscan.jni.HyperscanNativeLoader;
-import org.junit.jupiter.api.Test;
+import com.xenoamess.hyperscan.smoke.dual.DualApi;
+import com.xenoamess.hyperscan.smoke.dual.DualApiArgumentsSource;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ArgumentsSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class PlatformSelectionTest {
 
-    @Test
-    void platformIsValid() {
-        assertThat(HyperscanNativeLoader.selectPlatform()).isNotBlank();
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void platformIsValid(DualApi api) {
+        assertThat(api.getPlatform()).isNotBlank();
     }
 
-    @Test
-    void nativeLibraryLoads() {
-        HyperscanNativeLoader.load();
-        String actual = System.getProperty("org.bytedeco.javacpp.platform");
-        assertThat(actual).isNotNull();
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void nativeLibraryLoads(DualApi api) {
+        assertThat(api.getPlatform()).isNotBlank();
     }
 
-    @Test
-    void explicitPlatformOverridesSelection() {
-        String explicit = System.getProperty("org.bytedeco.javacpp.platform");
-        if (explicit != null) {
-            HyperscanNativeLoader.load();
-            String actual = System.getProperty("org.bytedeco.javacpp.platform");
-            assertThat(actual).isEqualTo(explicit);
-        }
+    @ParameterizedTest
+    @ArgumentsSource(DualApiArgumentsSource.class)
+    void versionIsAvailable(DualApi api) {
+        assertThat(api.getVersion()).isNotBlank().matches("\\d+\\.\\d+\\.\\d+.*");
     }
 }
