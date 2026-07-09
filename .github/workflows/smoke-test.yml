@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       nativeVersion:
-        description: 'Native artifact version to test (e.g. 5.4.12-2.0.4-x7)'
+        description: 'Native artifact version to test (e.g. 5.4.12-2.0.4-x9)'
         required: true
-        default: '5.4.12-2.0.4-x7'
+        default: '5.4.12-2.0.4-x9'
 
 permissions:
   contents: read
@@ -54,7 +54,8 @@ jobs:
             platform: windows-x86_64
 
     env:
-      NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}
+      NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}
+      DETECTED_PLATFORM: ${{ matrix.platform }}
       GITHUB_SHA: ${{ github.sha }}
       RUNNER_OS: ${{ matrix.os }}
       CPU_MODEL: unknown
@@ -71,7 +72,7 @@ jobs:
         uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '25'
 
       - name: Cache Maven dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
@@ -84,7 +85,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}"
+          VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}"
           echo "nativeVersion=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Collect CPU information (Linux)
@@ -158,7 +159,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: benchmark-raw-${{ matrix.platform }}
-          path: target/benchmark-results/benchmark-result.json
+          path: target/benchmark-results/
           if-no-files-found: warn
 
   report:
@@ -184,7 +185,7 @@ jobs:
             "${NATIVE_VERSION}" \
             "${GITHUB_SHA}"
         env:
-          NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}
+          NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}
           GITHUB_SHA: ${{ github.sha }}
 
       - name: Generate performance summary SVG
@@ -195,7 +196,7 @@ jobs:
             "${NATIVE_VERSION}" \
             "${GITHUB_SHA}"
         env:
-          NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x7' }}
+          NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}
           GITHUB_SHA: ${{ github.sha }}
 
       - name: Upload performance report
