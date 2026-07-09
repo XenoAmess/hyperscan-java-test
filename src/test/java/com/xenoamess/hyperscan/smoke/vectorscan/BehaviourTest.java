@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class BehaviourTest {
+public class BehaviourTest {
 
     private record MatchRecord(int to, int id) {
     }
@@ -34,7 +34,7 @@ class BehaviourTest {
     private record CallbackStopCase(String pattern, EnumSet<DualExpressionFlag> flags, String corpus) {
     }
 
-    private record HugeScanCase(String pattern, EnumSet<DualExpressionFlag> flags, String preBlock, String postBlock) {
+    public record HugeScanCase(String pattern, EnumSet<DualExpressionFlag> flags, String preBlock, String postBlock) {
     }
 
     private static final class CountingHandler implements DualByteMatchHandler {
@@ -107,7 +107,7 @@ class BehaviourTest {
             new CallbackStopCase("[012]{3,7}.*abba", EnumSet.noneOf(DualExpressionFlag.class), "0120120120abbaabba")
     );
 
-    private static final List<HugeScanCase> GIGABYTE_CASES = List.of(
+    public static final List<HugeScanCase> GIGABYTE_CASES = List.of(
             new HugeScanCase("foobar", EnumSet.noneOf(DualExpressionFlag.class), "flibble", "foobar"),
             new HugeScanCase("longliteralislongerthanlong", EnumSet.noneOf(DualExpressionFlag.class), "precursor", "longliteralislongerthanlong"),
             new HugeScanCase("foobar\\z", EnumSet.noneOf(DualExpressionFlag.class), "flibble", "foobar"),

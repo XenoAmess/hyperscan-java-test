@@ -68,7 +68,10 @@ def find_benchmark(result, scenario_name):
 def throughput_for(result, scenario_name):
     bench = find_benchmark(result, scenario_name)
     if bench:
-        return float(safe_get(bench, 'metrics', 'throughputMBpsAvg', default=0.0) or 0.0)
+        value = safe_get(bench, 'metrics', 'throughputMBpsAvg', default=None)
+        if value is None:
+            value = safe_get(bench, 'metrics', 'throughputMBps', default=0.0)
+        return float(value or 0.0)
     return 0.0
 
 

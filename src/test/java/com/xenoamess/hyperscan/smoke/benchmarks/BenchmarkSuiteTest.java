@@ -10,7 +10,10 @@ import com.xenoamess.hyperscan.smoke.dual.DualExpression;
 import com.xenoamess.hyperscan.smoke.dual.DualExpressionFlag;
 import com.xenoamess.hyperscan.smoke.dual.DualImplementation;
 import com.xenoamess.hyperscan.smoke.dual.DualMatch;
+import com.xenoamess.hyperscan.smoke.dual.DualMode;
 import com.xenoamess.hyperscan.smoke.dual.DualScanner;
+import com.xenoamess.hyperscan.smoke.dual.DualStream;
+import com.xenoamess.hyperscan.smoke.vectorscan.BehaviourTest;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -282,6 +285,152 @@ class BenchmarkSuiteTest {
                         .metric("throughputMBpsAvg", avg(throughputMBps))
                         .metric("throughputMBpsMin", min(throughputMBps))
                         .metric("throughputMBpsMax", max(throughputMBps)));
+            }
+        }
+    }
+
+    private static boolean isLargeBenchmarkEnabled() {
+        return Boolean.parseBoolean(System.getProperty("hyperscan.benchmarks.large.enabled", "true"));
+    }
+
+    private static String sanitizePattern(String pattern) {
+        return pattern.replaceAll("[^A-Za-z0-9]", "_");
+    }
+
+    @Test
+    void benchmarkScanSeveralGigabytesNoMatch() throws Exception {
+        if (!isLargeBenchmarkEnabled()) {
+            return;
+        }
+        for (DualImplementation impl : DualImplementation.values()) {
+            DualApi api = impl.createAdapter();
+            List<DualExpression> expressions = List.of(
+                    api.createExpression("hatstand.*teakettle.*badgerbrush", EnumSet.of(DualExpressionFlag.DOTALL), 1)
+            );
+            try (DualDatabase database = api.compileDatabase(expressions, DualMode.STREAM)) {
+                DualStream stream = api.openStream(database);
+                try {
+                    DualByteMatchHandler handler = (expr, from, to) -> true;
+                    byte[] chunk = new byte[1024 * 1024];
+                    Arrays.fill(chunk, (byte) 'X');
+                    long chunks = 5L * 1024;
+                    long start = System.nanoTime();
+                    while (chunks-- > 0) {
+                        api.scanStream(null, stream, chunk, handler);
+                    }
+                    api.closeStream(null, stream, handler);
+                    long elapsed = System.nanoTime() - start;
+                    stream = null;
+                    long totalBytes = 5L * 1024 * 1024 * 1024;
+                    double throughput = (double) totalBytes * 1_000_000_000.0 / elapsed / 1024.0 / 1024.0;
+                    recordResult(impl, api, new BenchmarkResult("scanSeveralGigabytesNoMatch")
+                            .metric("inputBytes", totalBytes)
+                            .metric("matches", 0)
+                            .metric("elapsedMs", elapsed / 1_000_000.0)
+                            .metric("throughputMBps", throughput));
+                } finally {
+                    if (stream != null) {
+                        api.closeStream(null, stream, null);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void benchmarkScanGigabytesStreamingMatch() throws Exception {
+        if (!isLargeBenchmarkEnabled()) {
+            return;
+        }
+        byte[] chunk = new byte[1024 * 1024];
+        Arrays.fill(chunk, (byte) 'X');
+        for (DualImplementation impl : DualImplementation.values()) {
+            DualApi api = impl.createAdapter();
+            for (BehaviourTest.HugeScanCase params : BehaviourTest.GIGABYTE_CASES) {
+                byte[] preBlock = params.preBlock().getBytes(StandardCharsets.UTF_8);
+                byte[] postBlock = params.postBlock().getBytes(StandardCharsets.UTF_8);
+                long[] gigabytes = {1, 2};
+                for (long gb : gigabytes) {
+                    List<DualExpression> expressions = List.of(
+                            api.createExpression(params.pattern(), params.flags(), 1)
+                    );
+                    try (DualDatabase database = api.compileDatabase(expressions, DualMode.STREAM)) {
+                        DualStream stream = api.openStream(database);
+                        try {
+                            long[] matches = new long[1];
+                            DualByteMatchHandler handler = (expr, from, to) -> {
+                                matches[0]++;
+                                return true;
+                            };
+                            long start = System.nanoTime();
+                            api.scanStream(null, stream, preBlock, handler);
+                            long remaining = gb * 1024;
+                            while (remaining-- > 0) {
+                                api.scanStream(null, stream, chunk, handler);
+                            }
+                            api.scanStream(null, stream, postBlock, handler);
+                            api.closeStream(null, stream, handler);
+                            long elapsed = System.nanoTime() - start;
+                            stream = null;
+                            long totalBytes = preBlock.length + gb * 1024L * 1024L * 1024L + postBlock.length;
+                            double throughput = (double) totalBytes * 1_000_000_000.0 / elapsed / 1024.0 / 1024.0;
+                            recordResult(impl, api, new BenchmarkResult(
+                                    "scanGigabytesStreamingMatch_" + sanitizePattern(params.pattern()) + "_" + gb + "GB")
+                                    .metric("inputBytes", totalBytes)
+                                    .metric("matches", matches[0])
+                                    .metric("elapsedMs", elapsed / 1_000_000.0)
+                                    .metric("throughputMBps", throughput));
+                        } finally {
+                            if (stream != null) {
+                                api.closeStream(null, stream, null);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void benchmarkScanGigabytesBlockMatch() throws Exception {
+        if (!isLargeBenchmarkEnabled()) {
+            return;
+        }
+        for (DualImplementation impl : DualImplementation.values()) {
+            DualApi api = impl.createAdapter();
+            for (BehaviourTest.HugeScanCase params : BehaviourTest.GIGABYTE_CASES) {
+                byte[] preBlock = params.preBlock().getBytes(StandardCharsets.UTF_8);
+                byte[] postBlock = params.postBlock().getBytes(StandardCharsets.UTF_8);
+                byte[] block = new byte[1024 * 1024];
+                Arrays.fill(block, (byte) 'X');
+                System.arraycopy(preBlock, 0, block, 0, preBlock.length);
+                System.arraycopy(postBlock, 0, block, block.length - postBlock.length, postBlock.length);
+                List<DualExpression> expressions = List.of(
+                        api.createExpression(params.pattern(), params.flags(), 1)
+                );
+                try (DualDatabase database = api.compileDatabase(expressions);
+                     DualScanner scanner = api.createScanner()) {
+                    api.allocScratch(scanner, database);
+                    int iterations = 10;
+                    long[] matches = new long[1];
+                    DualByteMatchHandler handler = (expr, from, to) -> {
+                        matches[0]++;
+                        return true;
+                    };
+                    long start = System.nanoTime();
+                    for (int i = 0; i < iterations; i++) {
+                        api.scan(scanner, database, block, handler);
+                    }
+                    long elapsed = System.nanoTime() - start;
+                    double avgElapsed = (double) elapsed / iterations;
+                    double throughput = (double) block.length * 1_000_000_000.0 / avgElapsed / 1024.0 / 1024.0;
+                    recordResult(impl, api, new BenchmarkResult("scanGigabytesBlockMatch_" + sanitizePattern(params.pattern()))
+                            .metric("inputBytes", block.length)
+                            .metric("matches", matches[0])
+                            .metric("iterations", iterations)
+                            .metric("elapsedMs", avgElapsed / 1_000_000.0)
+                            .metric("throughputMBps", throughput));
+                }
             }
         }
     }

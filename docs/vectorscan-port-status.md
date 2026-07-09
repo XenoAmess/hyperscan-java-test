@@ -71,3 +71,26 @@
 - `scanGigabytesBlockMatch` 最大块 1MB，每个块大小测试 `size`、`size+4`、`size+postBlock.length`。
 - 三个测试均加 `@Timeout(value = 5, unit = TimeUnit.MINUTES)`。
 - 全量测试结果：4116 个测试，0 失败，0 错误，46 跳过。
+
+## 大流量场景加入性能报告实施计划（已实施）
+
+目标：将 `BehaviourTest` 中的大流量场景作为 benchmark 加入 `BenchmarkSuiteTest`，使其结果出现在性能报告里。
+
+### 说明
+
+- 上游 `vectorscan/benchmarks/benchmarks.cpp` 测试的是内部低层 API（`Shufti`、`Truffle`、`Vermicelli`、`Noodle`），这些 API 没有暴露到 `hs.h` / Java 层，因此无法直接移植。
+- 可移植的是 `BehaviourTest` 中通过公共 API 实现的三个大流量场景。
+
+### 实施结果
+
+1. 已新增开关 `hyperscan.benchmarks.large.enabled`，默认值 `true`。
+2. 已新增三个 benchmark 方法：
+   - `benchmarkScanSeveralGigabytesNoMatch`：5GB，1MB 分块，STREAM，单次测量，记录吞吐。
+   - `benchmarkScanGigabytesStreamingMatch`：13 个 case 全部，1GB 和 2GB 各跑，STREAM，单次测量，记录吞吐/匹配数。
+   - `benchmarkScanGigabytesBlockMatch`：13 个 case 全部，1MB 块，BLOCK，多次测量，记录吞吐/匹配数。
+3. 每个 benchmark 都按 `DualImplementation` 同时跑 JavaCpp 和 Panama。
+4. `BenchmarkResult` 记录：`inputBytes`、`matches`、`elapsedMs`、`throughputMBps`。
+5. 现有 `BenchmarkSuiteTest` benchmark 保持不变。
+6. `.github/workflows/smoke-test.yml` 的 `mvn -B test` 已显式加上 `-Dhyperscan.benchmarks.large.enabled=true`。
+7. 报告脚本 `generate-performance-report.py` / `generate-performance-svg.py` 已支持 `throughputMBps` 指标（原有指标为 `throughputMBpsAvg`）。
+8. 全量测试：4119 个测试，0 失败，0 错误，46 跳过。

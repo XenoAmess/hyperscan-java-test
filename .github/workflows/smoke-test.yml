@@ -136,7 +136,8 @@ jobs:
           set -euo pipefail
           mvn -B test \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
-            -Djavacpp.platform=${{ matrix.platform }}
+            -Djavacpp.platform=${{ matrix.platform }} \
+            -Dhyperscan.benchmarks.large.enabled=true
 
       - name: Skip smoke tests for ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED == 'true'

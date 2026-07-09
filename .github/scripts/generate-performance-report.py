@@ -84,6 +84,8 @@ def metric_for(result, scenario_name, key):
 
 def throughput_for(result, scenario_name=FIXED_WORKLOAD_SCENARIO):
     value = metric_for(result, scenario_name, 'throughputMBpsAvg')
+    if value is None:
+        value = metric_for(result, scenario_name, 'throughputMBps')
     return float(value or 0.0)
 
 
