@@ -192,19 +192,7 @@
             <groupId>com.xenoamess.hyperscan_panama</groupId>
             <artifactId>hyperscan-java-panama-native</artifactId>
             <version>${panama.version}</version>
-            <classifier>linux-x86_64</classifier>
-        </dependency>
-        <dependency>
-            <groupId>com.xenoamess.hyperscan_panama</groupId>
-            <artifactId>hyperscan-java-panama-native</artifactId>
-            <version>${panama.version}</version>
-            <classifier>linux-arm64</classifier>
-        </dependency>
-        <dependency>
-            <groupId>com.xenoamess.hyperscan_panama</groupId>
-            <artifactId>hyperscan-java-panama-native</artifactId>
-            <version>${panama.version}</version>
-            <classifier>windows-x86_64</classifier>
+            <classifier>${panama.native.classifier}</classifier>
         </dependency>
 
         <dependency>
@@ -232,4 +220,43 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <profiles>
+        <profile>
+            <id>panama-linux-x86_64</id>
+            <activation>
+                <os>
+                    <family>unix</family>
+                    <arch>amd64</arch>
+                </os>
+            </activation>
+            <properties>
+                <panama.native.classifier>linux-x86_64</panama.native.classifier>
+            </properties>
+        </profile>
+        <profile>
+            <id>panama-linux-arm64</id>
+            <activation>
+                <os>
+                    <family>unix</family>
+                    <arch>aarch64</arch>
+                </os>
+            </activation>
+            <properties>
+                <panama.native.classifier>linux-arm64</panama.native.classifier>
+            </properties>
+        </profile>
+        <profile>
+            <id>panama-windows-x86_64</id>
+            <activation>
+                <os>
+                    <family>windows</family>
+                    <arch>amd64</arch>
+                </os>
+            </activation>
+            <properties>
+                <panama.native.classifier>windows-x86_64</panama.native.classifier>
+            </properties>
+        </profile>
+    </profiles>
 </project>
