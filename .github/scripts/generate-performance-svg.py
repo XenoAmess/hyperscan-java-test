@@ -6,6 +6,9 @@ from html import escape
 from datetime import datetime, timezone
 
 
+FIXED_WORKLOAD_SCENARIO = 'ISA granularity benchmark'
+
+
 def load_results(input_dir):
     results = []
     for root, _, files in os.walk(input_dir):
@@ -42,23 +45,60 @@ def format_num(value, decimals=2):
         return str(value)
 
 
-def throughput_for(result):
-    bench = safe_get(result, 'benchmarks', 0, default={})
-    metrics = safe_get(bench, 'metrics', default={})
-    return float(safe_get(metrics, 'throughputMBpsAvg', default=0.0) or 0.0)
+def implementation_for(result):
+    impl = safe_get(result, 'implementation')
+    if impl:
+        return impl
+    source = result.get('_source', '')
+    lower = source.lower()
+    if 'panama' in lower:
+        return 'panama'
+    if 'javacpp' in lower:
+        return 'javacpp'
+    return 'javacpp'
 
 
-def build_platform_rows(results):
+def find_benchmark(result, scenario_name):
+    for bench in safe_get(result, 'benchmarks', default=[]):
+        if safe_get(bench, 'name') == scenario_name:
+            return bench
+    return None
+
+
+def throughput_for(result, scenario_name):
+    bench = find_benchmark(result, scenario_name)
+    if bench:
+        return float(safe_get(bench, 'metrics', 'throughputMBpsAvg', default=0.0) or 0.0)
+    return 0.0
+
+
+def fixed_workload_scenario(results):
+    names = set()
+    for r in results:
+        for bench in safe_get(r, 'benchmarks', default=[]):
+            name = safe_get(bench, 'name')
+            if name:
+                names.add(name)
+    if FIXED_WORKLOAD_SCENARIO in names:
+        return FIXED_WORKLOAD_SCENARIO
+    for name in sorted(names):
+        for r in results:
+            if safe_get(find_benchmark(r, name), 'metrics', 'throughputMBpsAvg'):
+                return name
+    return sorted(names)[0] if names else None
+
+
+def build_platform_rows(results, scenario_name):
     by_platform = {}
     for r in results:
         platform = safe_get(r, 'platform', default='unknown')
-        impl = safe_get(r, 'implementation', default='javacpp')
+        impl = implementation_for(r)
         by_platform.setdefault(platform, {})[impl] = r
 
     rows = []
     for platform, impls in by_platform.items():
-        javacpp_tp = throughput_for(impls.get('javacpp'))
-        panama_tp = throughput_for(impls.get('panama'))
+        javacpp_tp = throughput_for(impls.get('javacpp'), scenario_name) if impls.get('javacpp') else 0.0
+        panama_tp = throughput_for(impls.get('panama'), scenario_name) if impls.get('panama') else 0.0
         best_tp = max(javacpp_tp, panama_tp)
         rows.append({
             'platform': platform,
@@ -67,13 +107,12 @@ def build_platform_rows(results):
             'bestThroughput': best_tp
         })
 
-    # Sort platforms by the faster of the two implementations
     rows.sort(key=lambda x: x['bestThroughput'], reverse=True)
     return rows
 
 
-def generate_svg(results, output_file, native_version, commit_sha):
-    rows = build_platform_rows(results)
+def generate_svg(results, output_file, native_version, commit_sha, scenario_name):
+    rows = build_platform_rows(results, scenario_name)
     if not rows:
         print('No results found', file=sys.stderr)
         sys.exit(1)
@@ -111,17 +150,12 @@ def generate_svg(results, output_file, native_version, commit_sha):
     svg.append('    </linearGradient>')
     svg.append('  </defs>')
 
-    # Background
     svg.append(f'  <rect width="{width}" height="{height}" fill="#f6f8fa" rx="6" />')
-
-    # Title
     svg.append(f'  <text x="{width / 2}" y="30" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#1f2328">Hyperscan Java Native Performance Summary</text>')
 
-    # Subtitle
-    subtitle = f"Native {native_version}  ·  {len(rows)} platforms  ·  commit {commit_short}"
+    subtitle = f"Native {native_version}  ·  {len(rows)} platforms  ·  {scenario_name}  ·  commit {commit_short}"
     svg.append(f'  <text x="{width / 2}" y="52" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#656d76">{escape(subtitle)}</text>')
 
-    # Legend
     legend_x = left_margin
     legend_y = 74
     svg.append(f'  <rect x="{legend_x}" y="{legend_y - 10}" width="12" height="12" fill="url(#javacppGradient)" rx="2" />')
@@ -139,23 +173,17 @@ def generate_svg(results, output_file, native_version, commit_sha):
         javacpp_width = (javacpp_tp / max_tp) * chart_width
         panama_width = (panama_tp / max_tp) * chart_width
 
-        # Platform label centered between the two bars
         label_y = group_y + (bar_height * 2 + bar_gap) / 2 + 4
         svg.append(f'  <text x="{left_margin - 10}" y="{label_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="end" fill="#24292f">{escape(platform)}</text>')
 
-        # Bar backgrounds
         svg.append(f'  <rect x="{left_margin}" y="{group_y}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
         svg.append(f'  <rect x="{left_margin}" y="{group_y + bar_height + bar_gap}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
 
-        # JavaCPP bar
         if javacpp_width > 0:
             svg.append(f'  <rect x="{left_margin}" y="{group_y}" width="{javacpp_width:.1f}" height="{bar_height}" fill="url(#javacppGradient)" rx="4" />')
-
-        # Panama bar
         if panama_width > 0:
             svg.append(f'  <rect x="{left_margin}" y="{group_y + bar_height + bar_gap}" width="{panama_width:.1f}" height="{bar_height}" fill="url(#panamaGradient)" rx="4" />')
 
-        # Value labels
         javacpp_value_y = group_y + bar_height / 2 + 4
         javacpp_value_text = f'{format_num(javacpp_tp)} MB/s'
         javacpp_value_x = left_margin + min(javacpp_width, chart_width) + 6
@@ -170,7 +198,6 @@ def generate_svg(results, output_file, native_version, commit_sha):
             panama_value_x = left_margin + chart_width + 6
         svg.append(f'  <text x="{panama_value_x}" y="{panama_value_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0969da">{escape(panama_value_text)}</text>')
 
-    # Footer
     footer_y = height - 15
     svg.append(f'  <text x="{width / 2}" y="{footer_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" text-anchor="middle" fill="#656d76">Generated {escape(generated_at)}  ·  Full report at xenoamess.github.io/hyperscan-java-test</text>')
 
@@ -184,19 +211,22 @@ def generate_svg(results, output_file, native_version, commit_sha):
 
 def main():
     if len(sys.argv) < 3:
-        print('Usage: generate-performance-svg.py <input-dir> <output-svg> [native-version] [commit-sha]', file=sys.stderr)
+        print('Usage: generate-performance-svg.py <input-dir> <output-svg> [native-version] [commit-sha] [scenario]', file=sys.stderr)
         sys.exit(1)
     input_dir = sys.argv[1]
     output_file = sys.argv[2]
     native_version = sys.argv[3] if len(sys.argv) > 3 else os.environ.get('NATIVE_VERSION', 'unknown')
     commit_sha = sys.argv[4] if len(sys.argv) > 4 else os.environ.get('GITHUB_SHA', 'unknown')
+    scenario = sys.argv[5] if len(sys.argv) > 5 else None
 
     results = load_results(input_dir)
     if not results:
         print('No benchmark results found in input directory.', file=sys.stderr)
         sys.exit(1)
 
-    generate_svg(results, output_file, native_version, commit_sha)
+    if scenario is None:
+        scenario = fixed_workload_scenario(results)
+    generate_svg(results, output_file, native_version, commit_sha, scenario)
 
 
 if __name__ == '__main__':

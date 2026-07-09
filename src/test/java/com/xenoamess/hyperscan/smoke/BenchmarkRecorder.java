@@ -11,8 +11,6 @@ import java.util.List;
 public class BenchmarkRecorder {
     private static final String OUTPUT_DIR = System.getProperty(
             "benchmark.output.dir", "target/benchmark-results");
-    private static final String OUTPUT_FILE = System.getProperty(
-            "benchmark.output.file", "benchmark-result-${implementation}.json");
 
     private final String platform;
     private final String nativeVersion;
@@ -21,14 +19,14 @@ public class BenchmarkRecorder {
     private final String runnerArch;
     private final String cpuModel;
     private final String cpuFlags;
-    private final String implementation;
+    private final String outputFile;
     private final String timestamp;
     private final List<BenchmarkResult> benchmarks;
 
     public BenchmarkRecorder(String platform, String nativeVersion, String commitSha,
                              String runnerOs, String runnerArch, String cpuModel,
                              String cpuFlags, List<BenchmarkResult> benchmarks) {
-        this(platform, nativeVersion, commitSha, runnerOs, runnerArch, cpuModel, cpuFlags, "javacpp", benchmarks);
+        this(platform, nativeVersion, commitSha, runnerOs, runnerArch, cpuModel, cpuFlags, null, benchmarks);
     }
 
     public BenchmarkRecorder(String platform, String nativeVersion, String commitSha,
@@ -41,7 +39,10 @@ public class BenchmarkRecorder {
         this.runnerArch = runnerArch;
         this.cpuModel = cpuModel;
         this.cpuFlags = cpuFlags;
-        this.implementation = implementation == null ? "javacpp" : implementation;
+        String defaultFile = implementation == null
+                ? "benchmark-result.json"
+                : "benchmark-result-" + implementation + ".json";
+        this.outputFile = System.getProperty("benchmark.output.file", defaultFile);
         this.timestamp = Instant.now().toString();
         this.benchmarks = benchmarks;
     }
@@ -51,8 +52,7 @@ public class BenchmarkRecorder {
         if (!dir.exists() && !dir.mkdirs()) {
             throw new IllegalStateException("Cannot create benchmark output directory: " + dir);
         }
-        String fileName = OUTPUT_FILE.replace("${implementation}", implementation);
-        File file = new File(dir, fileName);
+        File file = new File(dir, outputFile);
         try (PrintWriter writer = new PrintWriter(new OutputStreamWriter(
                 new FileOutputStream(file), StandardCharsets.UTF_8))) {
             writer.println(toJson());
@@ -64,7 +64,6 @@ public class BenchmarkRecorder {
         StringBuilder sb = new StringBuilder();
         sb.append("{\n");
         sb.append("  \"platform\": ").append(jsonString(platform)).append(",\n");
-        sb.append("  \"implementation\": ").append(jsonString(implementation)).append(",\n");
         sb.append("  \"nativeVersion\": ").append(jsonString(nativeVersion)).append(",\n");
         sb.append("  \"commitSha\": ").append(jsonString(commitSha)).append(",\n");
         sb.append("  \"runnerOs\": ").append(jsonString(runnerOs)).append(",\n");

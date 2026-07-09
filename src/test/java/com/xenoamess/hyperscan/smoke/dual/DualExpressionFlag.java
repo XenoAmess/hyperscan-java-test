@@ -7,6 +7,9 @@ public enum DualExpressionFlag {
     SINGLEMATCH,
     ALLOWEMPTY,
     UTF8,
+    UCP,
     PREFILTER,
-    SOM_LEFTMOST
+    SOM_LEFTMOST,
+    COMBINATION,
+    QUIET
 }

@@ -27,11 +27,13 @@ class PatternFilterTest {
         try (DualPatternFilter filter = api.createPatternFilter(patterns)) {
             List<Matcher> matchers = filter.filter("The number is 7 the NUMber is 27");
 
+            List<String> groups = new java.util.ArrayList<>();
             for (Matcher matcher : matchers) {
                 while (matcher.find()) {
-                    System.out.println(matcher.group(1));
+                    groups.add(matcher.group(1));
                 }
             }
+            assertEquals(asList("7", "27"), groups);
         }
     }
 
