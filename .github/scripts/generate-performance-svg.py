@@ -76,6 +76,22 @@ def throughput_for(result, scenario_name):
     return 0.0
 
 
+def ops_per_second_for(result, scenario_name):
+    bench = find_benchmark(result, scenario_name)
+    if bench:
+        value = safe_get(bench, 'metrics', 'opsPerSecond', default=0.0)
+        return float(value or 0.0)
+    return 0.0
+
+
+def value_for(result, scenario_name):
+    tp = throughput_for(result, scenario_name)
+    if tp > 0:
+        return tp, 'MB/s'
+    ops = ops_per_second_for(result, scenario_name)
+    return ops, 'ops/s'
+
+
 def fixed_workload_scenario(results):
     names = set()
     for r in results:
@@ -114,23 +130,29 @@ def build_platform_rows(results, scenario_name):
         by_platform.setdefault(platform, {})[impl] = r
 
     rows = []
+    unit = 'MB/s'
     for platform, impls in by_platform.items():
-        javacpp_tp = throughput_for(impls.get('javacpp'), scenario_name) if impls.get('javacpp') else 0.0
-        panama_tp = throughput_for(impls.get('panama'), scenario_name) if impls.get('panama') else 0.0
-        best_tp = max(javacpp_tp, panama_tp)
+        javacpp_value, javacpp_unit = value_for(impls.get('javacpp'), scenario_name) if impls.get('javacpp') else (0.0, 'MB/s')
+        panama_value, panama_unit = value_for(impls.get('panama'), scenario_name) if impls.get('panama') else (0.0, 'MB/s')
+        if javacpp_value > 0:
+            unit = javacpp_unit
+        elif panama_value > 0:
+            unit = panama_unit
+        best_tp = max(javacpp_value, panama_value)
         rows.append({
             'platform': platform,
-            'javacpp': javacpp_tp,
-            'panama': panama_tp,
-            'bestThroughput': best_tp
+            'javacpp': javacpp_value,
+            'panama': panama_value,
+            'bestThroughput': best_tp,
+            'unit': unit
         })
 
     rows.sort(key=lambda x: x['bestThroughput'], reverse=True)
-    return rows
+    return rows, unit
 
 
 def generate_svg(results, output_file, native_version, commit_sha, scenario_name):
-    rows = build_platform_rows(results, scenario_name)
+    rows, unit = build_platform_rows(results, scenario_name)
     if not rows:
         print('No results found', file=sys.stderr)
         sys.exit(1)
@@ -203,14 +225,14 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
             svg.append(f'  <rect x="{left_margin}" y="{group_y + bar_height + bar_gap}" width="{panama_width:.1f}" height="{bar_height}" fill="url(#panamaGradient)" rx="4" />')
 
         javacpp_value_y = group_y + bar_height / 2 + 4
-        javacpp_value_text = f'{format_num(javacpp_tp)} MB/s'
+        javacpp_value_text = f'{format_num(javacpp_tp)} {unit}'
         javacpp_value_x = left_margin + min(javacpp_width, chart_width) + 6
         if javacpp_width + 85 > chart_width:
             javacpp_value_x = left_margin + chart_width + 6
         svg.append(f'  <text x="{javacpp_value_x}" y="{javacpp_value_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#1a7f37">{escape(javacpp_value_text)}</text>')
 
         panama_value_y = group_y + bar_height + bar_gap + bar_height / 2 + 4
-        panama_value_text = f'{format_num(panama_tp)} MB/s'
+        panama_value_text = f'{format_num(panama_tp)} {unit}'
         panama_value_x = left_margin + min(panama_width, chart_width) + 6
         if panama_width + 85 > chart_width:
             panama_value_x = left_margin + chart_width + 6
