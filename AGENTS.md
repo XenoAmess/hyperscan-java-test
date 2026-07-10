@@ -20,3 +20,13 @@
 - Follow existing code style and naming conventions.
 - Keep responses concise and direct.
 - Use Chinese when the user communicates in Chinese.
+
+## Cross-Repository Optimization Strategy
+
+For any performance optimization or architectural change in this repository, first evaluate whether the same improvement can be applied to the sibling `../hyperscan-java-panama` project:
+
+1. Determine if the change belongs more naturally in the `hyperscan-java-panama` layer (e.g., generated bindings, JNI facade, callback helpers, native build flags).
+2. Determine if the change is reusable in `hyperscan-java-panama` (e.g., MethodHandle caching, direct upcall stubs, functional-interface conversion patterns).
+3. If either answer is yes, implement the change in `../hyperscan-java-panama` first (or in parallel), then adapt and apply it here.
+
+Do not optimize locally in `hyperscan-java-test` only when the same optimization should live in, or can be shared with, the shared library.
