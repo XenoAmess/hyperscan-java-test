@@ -139,7 +139,8 @@ jobs:
           mvn -B test \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
             -Djavacpp.platform=${{ matrix.platform }} \
-            -Dhyperscan.benchmarks.large.enabled=true
+            -Dhyperscan.benchmarks.large.enabled=true \
+            -Dbenchmark.platform=${{ matrix.platform }}
 
       - name: Skip smoke tests for ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED == 'true'

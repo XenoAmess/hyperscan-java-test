@@ -495,30 +495,38 @@ class BenchmarkSuiteTest {
         if (System.getProperty("os.name").toLowerCase().contains("linux")) {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                     Runtime.getRuntime().exec("cat /proc/cpuinfo").getInputStream(), StandardCharsets.UTF_8))) {
-                return reader.lines()
+                String model = reader.lines()
                         .filter(line -> line.startsWith("model name"))
                         .map(line -> line.substring(line.indexOf(':') + 1).trim())
                         .findFirst()
                         .orElse("");
+                if (!model.isEmpty()) {
+                    return model;
+                }
             } catch (Exception ignored) {
             }
         }
-        return System.getenv("CPU_MODEL") == null ? "" : System.getenv("CPU_MODEL");
+        String env = System.getenv("CPU_MODEL");
+        return env == null ? "" : env;
     }
 
     private static String readCpuFlags() {
         if (System.getProperty("os.name").toLowerCase().contains("linux")) {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                     Runtime.getRuntime().exec("cat /proc/cpuinfo").getInputStream(), StandardCharsets.UTF_8))) {
-                return reader.lines()
-                        .filter(line -> line.startsWith("flags"))
+                String flags = reader.lines()
+                        .filter(line -> line.startsWith("flags") || line.startsWith("Features"))
                         .map(line -> line.substring(line.indexOf(':') + 1).trim())
                         .findFirst()
                         .orElse("");
+                if (!flags.isEmpty()) {
+                    return flags;
+                }
             } catch (Exception ignored) {
             }
         }
-        return System.getenv("CPU_FLAGS") == null ? "" : System.getenv("CPU_FLAGS");
+        String env = System.getenv("CPU_FLAGS");
+        return env == null ? "" : env;
     }
 
     private static List<DualExpression> buildCrossPlatformExpressions(DualApi api, int count) {
