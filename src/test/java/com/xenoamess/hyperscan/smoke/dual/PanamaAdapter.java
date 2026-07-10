@@ -30,6 +30,8 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -291,18 +293,30 @@ public class PanamaAdapter implements DualApi {
 
     private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = new ThreadLocal<>();
 
-    private static final MemorySegment MATCH_HANDLER = match_event_handler.allocate(
-            (id, from, to, flags, context) -> {
-                HandlerContext ctx = STREAM_CALLBACK.get();
-                if (ctx == null) {
-                    return 0;
-                }
-                DualExpression expression = findExpressionById(ctx.expressions(), id);
-                if (expression == null) {
-                    expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
-                }
-                return ctx.handler().onMatch(expression, from, to) ? 0 : -1;
-            }, HS_LIBRARY_ARENA);
+    private static final MemorySegment MATCH_HANDLER = createMatchHandler();
+
+    private static MemorySegment createMatchHandler() {
+        match_event_handler.Function callback = (id, from, to, flags, context) -> {
+            HandlerContext ctx = STREAM_CALLBACK.get();
+            if (ctx == null) {
+                return 0;
+            }
+            DualExpression expression = findExpressionById(ctx.expressions(), id);
+            if (expression == null) {
+                expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
+            }
+            return ctx.handler().onMatch(expression, from, to) ? 0 : -1;
+        };
+        try {
+            MethodHandle mh = MethodHandles.lookup()
+                    .findVirtual(match_event_handler.Function.class, "apply",
+                            MethodType.methodType(int.class, int.class, long.class, long.class, int.class, MemorySegment.class))
+                    .bindTo(callback);
+            return Linker.nativeLinker().upcallStub(mh, match_event_handler.descriptor(), HS_LIBRARY_ARENA);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     private record HandlerContext(DualByteMatchHandler handler, List<DualExpression> expressions) {
     }
