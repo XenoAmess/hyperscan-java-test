@@ -90,21 +90,30 @@ public class PanamaAdapter implements DualApi {
     }
 
     private static String findHsLibraryPath() {
-        String platform = HyperscanNativeLoader.selectPlatform();
-        String resource = "com/xenoamess/hyperscan_panama/jni/" + platform + "/libhs.so";
+        String platform = panamaPlatform();
+        String libraryName = System.mapLibraryName("hs");
+        String resource = "com/xenoamess/hyperscan_panama/jni/" + platform + "/" + libraryName;
         try (InputStream is = PanamaAdapter.class.getClassLoader().getResourceAsStream(resource)) {
             if (is == null) {
                 throw new RuntimeException("Native library not found on classpath: " + resource);
             }
             Path tempDir = Files.createTempDirectory("hyperscan-panama-adapter-");
             tempDir.toFile().deleteOnExit();
-            Path libFile = tempDir.resolve("libhs.so");
+            Path libFile = tempDir.resolve(libraryName);
             Files.copy(is, libFile, StandardCopyOption.REPLACE_EXISTING);
             libFile.toFile().deleteOnExit();
             return libFile.toAbsolutePath().toString();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    private static String panamaPlatform() {
+        String platform = System.getProperty("com.xenoamess.hyperscan_panama.platform");
+        if (platform == null || platform.isEmpty()) {
+            platform = HyperscanNativeLoader.selectPlatform();
+        }
+        return platform;
     }
 
     private static final class HsLibrary {
