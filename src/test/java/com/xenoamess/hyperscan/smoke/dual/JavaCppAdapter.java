@@ -104,14 +104,16 @@ public class JavaCppAdapter implements DualApi {
     }
 
     private static String findHsLibraryPath() {
+        String hsLibraryName = System.mapLibraryName("hs");
+        String hsRuntimeName = System.mapLibraryName("hs_runtime");
         Map<String, String> loaded = Loader.getLoadedLibraries();
         for (Map.Entry<String, String> entry : loaded.entrySet()) {
             String key = entry.getKey();
             String value = entry.getValue();
-            if (key != null && key.contains("libhs.so") && !key.contains("libhs_runtime.so")) {
+            if (matchesLibraryName(key, hsLibraryName, hsRuntimeName)) {
                 return value;
             }
-            if (value != null && value.contains("libhs.so") && !value.contains("libhs_runtime.so")) {
+            if (matchesLibraryName(value, hsLibraryName, hsRuntimeName)) {
                 return value;
             }
         }
@@ -123,22 +125,45 @@ public class JavaCppAdapter implements DualApi {
         }
         String platform = Loader.getPlatform();
         File platformDir = new File(cacheDir, platform);
-        File libhs = new File(platformDir, "libhs.so");
+        File libhs = new File(platformDir, hsLibraryName);
         if (libhs.exists()) {
             return libhs.getAbsolutePath();
         }
-        File[] dirs = cacheDir.listFiles();
-        if (dirs != null) {
-            for (File dir : dirs) {
-                if (dir.isDirectory()) {
-                    File f = new File(dir, "libhs.so");
-                    if (f.exists()) {
-                        return f.getAbsolutePath();
-                    }
+        File[] cacheRoots = cacheDir.listFiles();
+        if (cacheRoots != null) {
+            for (File root : cacheRoots) {
+                File found = findLibraryFile(root, hsLibraryName, hsRuntimeName);
+                if (found != null) {
+                    return found.getAbsolutePath();
                 }
             }
         }
-        throw new RuntimeException("Could not find libhs.so");
+        throw new RuntimeException("Could not find " + hsLibraryName);
+    }
+
+    private static boolean matchesLibraryName(String path, String libraryName, String runtimeName) {
+        if (path == null || path.isEmpty()) {
+            return false;
+        }
+        String name = path.contains(File.separator) ? new File(path).getName() : path;
+        return name.equals(libraryName) && !name.equals(runtimeName);
+    }
+
+    private static File findLibraryFile(File file, String libraryName, String runtimeName) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    File found = findLibraryFile(child, libraryName, runtimeName);
+                    if (found != null) {
+                        return found;
+                    }
+                }
+            }
+        } else if (file.getName().equals(libraryName) && !file.getName().equals(runtimeName)) {
+            return file;
+        }
+        return null;
     }
 
     private static void setHsLibraryAllocator(String name, DualAllocator alloc, DualFree free) {
