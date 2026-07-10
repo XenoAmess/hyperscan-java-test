@@ -74,19 +74,29 @@ public class PanamaAdapter implements DualApi {
 
     private static void patchHyperscanSymbolLookup() {
         try {
-            Class<?> clazz = Class.forName("com.xenoamess.hyperscan_panama.jni.generated.hyperscan");
-            Field field = clazz.getDeclaredField("SYMBOL_LOOKUP");
-            field.setAccessible(true);
-            java.lang.reflect.Method baseMethod = UNSAFE.getClass().getDeclaredMethod("staticFieldBase", Field.class);
-            baseMethod.setAccessible(true);
-            Object base = baseMethod.invoke(UNSAFE, field);
-            java.lang.reflect.Method offsetMethod = UNSAFE.getClass().getDeclaredMethod("staticFieldOffset", Field.class);
-            offsetMethod.setAccessible(true);
-            long offset = (Long) offsetMethod.invoke(UNSAFE, field);
-            UNSAFE.putObject(base, offset, HS_LIBRARY_LOOKUP.or(Linker.nativeLinker().defaultLookup()));
+            String platform = panamaPlatform();
+            String family = com.xenoamess.hyperscan_panama.jni.HyperscanNativeLoader.selectPlatformFamily(platform);
+            String delegatePackage = "com.xenoamess.hyperscan_panama.jni." + family.replace('-', '_') + ".generated";
+            Class<?> facadeClazz = Class.forName("com.xenoamess.hyperscan_panama.jni.generated.hyperscan");
+            Class<?> delegateClazz = Class.forName(delegatePackage + ".hyperscan");
+            SymbolLookup patched = HS_LIBRARY_LOOKUP.or(Linker.nativeLinker().defaultLookup());
+            patchSymbolLookup(facadeClazz, patched);
+            patchSymbolLookup(delegateClazz, patched);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void patchSymbolLookup(Class<?> clazz, SymbolLookup lookup) throws Exception {
+        Field field = clazz.getDeclaredField("SYMBOL_LOOKUP");
+        field.setAccessible(true);
+        java.lang.reflect.Method baseMethod = UNSAFE.getClass().getDeclaredMethod("staticFieldBase", Field.class);
+        baseMethod.setAccessible(true);
+        Object base = baseMethod.invoke(UNSAFE, field);
+        java.lang.reflect.Method offsetMethod = UNSAFE.getClass().getDeclaredMethod("staticFieldOffset", Field.class);
+        offsetMethod.setAccessible(true);
+        long offset = (Long) offsetMethod.invoke(UNSAFE, field);
+        UNSAFE.putObject(base, offset, lookup);
     }
 
     private static String findHsLibraryPath() {
