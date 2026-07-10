@@ -61,6 +61,8 @@ public class PanamaAdapter implements DualApi {
     }
 
     private static final Arena HS_LIBRARY_ARENA = Arena.global();
+    private static final Arena STREAM_BUFFER_ARENA = Arena.global();
+    private static final ThreadLocal<MemorySegment> STREAM_BUFFER = ThreadLocal.withInitial(() -> MemorySegment.NULL);
     private static final SymbolLookup HS_LIBRARY_LOOKUP;
 
     static {
@@ -482,6 +484,19 @@ public class PanamaAdapter implements DualApi {
         return new PanamaStream(stream, scratch, expressions);
     }
 
+    private static MemorySegment getStreamBuffer(byte[] input) {
+        if (input == null) {
+            return MemorySegment.NULL;
+        }
+        MemorySegment buffer = STREAM_BUFFER.get();
+        if (buffer == MemorySegment.NULL || buffer.byteSize() < input.length) {
+            buffer = STREAM_BUFFER_ARENA.allocate(input.length);
+            STREAM_BUFFER.set(buffer);
+        }
+        MemorySegment.copy(MemorySegment.ofArray(input), 0, buffer, 0, input.length);
+        return buffer;
+    }
+
     @Override
     public void scanStream(DualScanner scanner, DualStream stream, byte[] input, DualByteMatchHandler handler) {
         PanamaStream s = (PanamaStream) stream;
@@ -492,13 +507,11 @@ public class PanamaAdapter implements DualApi {
             STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
         }
         try {
-            try (Arena arena = Arena.ofConfined()) {
-                MemorySegment data = input == null ? MemorySegment.NULL : allocateBytes(arena, input);
-                int length = input == null ? 4 : input.length;
-                int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
-                    checkResult(result);
-                }
+            MemorySegment data = getStreamBuffer(input);
+            int length = input == null ? 4 : input.length;
+            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
+            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
+                checkResult(result);
             }
         } finally {
             if (handler != null) {
