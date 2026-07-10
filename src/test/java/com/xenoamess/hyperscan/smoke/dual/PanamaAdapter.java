@@ -1,5 +1,6 @@
 package com.xenoamess.hyperscan.smoke.dual;
 
+import com.xenoamess.hyperscan_panama.jni.HyperscanJni;
 import com.xenoamess.hyperscan_panama.jni.HyperscanNativeLoader;
 import com.xenoamess.hyperscan_panama.jni.generated.hyperscan;
 import com.xenoamess.hyperscan_panama.jni.generated.hs_alloc_t;
@@ -8,7 +9,6 @@ import com.xenoamess.hyperscan_panama.jni.generated.hs_expr_ext;
 import com.xenoamess.hyperscan_panama.jni.generated.hs_expr_info;
 import com.xenoamess.hyperscan_panama.jni.generated.hs_free_t;
 import com.xenoamess.hyperscan_panama.jni.generated.hs_platform_info;
-import com.xenoamess.hyperscan_panama.jni.generated.match_event_handler;
 import com.xenoamess.hyperscan_panama.util.PatternFilter;
 import com.xenoamess.hyperscan_panama.wrapper.ByteMatchEventHandler;
 import com.xenoamess.hyperscan_panama.wrapper.CompileErrorException;
@@ -30,8 +30,6 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -128,29 +126,6 @@ public class PanamaAdapter implements DualApi {
         return platform;
     }
 
-    private static final class HsLibrary {
-        private static MethodHandle lookup(String name, FunctionDescriptor desc) {
-            MemorySegment symbol = HS_LIBRARY_LOOKUP.find(name).orElseThrow(() -> new RuntimeException("Symbol not found: " + name));
-            return Linker.nativeLinker().downcallHandle(symbol, desc);
-        }
-
-        private static final MethodHandle HS_COMPILE = lookup("hs_compile",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-        private static final MethodHandle HS_DATABASE_INFO = lookup("hs_database_info",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-        private static final MethodHandle HS_SERIALIZE_DATABASE = lookup("hs_serialize_database",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-        private static final MethodHandle HS_DESERIALIZE_DATABASE = lookup("hs_deserialize_database",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
-        private static final MethodHandle HS_ALLOC_SCRATCH = lookup("hs_alloc_scratch",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-        private static final MethodHandle HS_EXPRESSION_INFO = lookup("hs_expression_info",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-        private static final MethodHandle HS_FREE_COMPILE_ERROR = lookup("hs_free_compile_error",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
-        private static final MethodHandle HS_FREE_DATABASE = lookup("hs_free_database",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
-    }
 
     private static Arena allocatorArena;
     private static MemorySegment currentAllocator;
@@ -210,26 +185,11 @@ public class PanamaAdapter implements DualApi {
         }
     }
 
-    private static final MethodHandle FREE = lookupFree();
-
-    private static MethodHandle lookupFree() {
-        try {
-            MemorySegment symbol = Linker.nativeLinker().defaultLookup().find("free").orElseThrow(() -> new RuntimeException("free symbol not found"));
-            return Linker.nativeLinker().downcallHandle(symbol, FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
-        } catch (Throwable e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     private static void freeSegment(MemorySegment segment) {
         if (segment == null || segment == MemorySegment.NULL) {
             return;
         }
-        try {
-            FREE.invokeExact(segment);
-        } catch (Throwable e) {
-            throw new RuntimeException(e);
-        }
+        HYPERSCAN_JNI.free(segment);
     }
 
     private static MemorySegment reinterpretHandle(MemorySegment segment) {
@@ -291,32 +251,24 @@ public class PanamaAdapter implements DualApi {
         return seg;
     }
 
+    private static final HyperscanJni HYPERSCAN_JNI = HyperscanNativeLoader.loadJni();
+
     private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = new ThreadLocal<>();
 
-    private static final MemorySegment MATCH_HANDLER = createMatchHandler();
-
-    private static MemorySegment createMatchHandler() {
-        match_event_handler.Function callback = (id, from, to, flags, context) -> {
-            HandlerContext ctx = STREAM_CALLBACK.get();
-            if (ctx == null) {
-                return 0;
-            }
-            DualExpression expression = findExpressionById(ctx.expressions(), id);
-            if (expression == null) {
-                expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
-            }
-            return ctx.handler().onMatch(expression, from, to) ? 0 : -1;
-        };
-        try {
-            MethodHandle mh = MethodHandles.lookup()
-                    .findVirtual(match_event_handler.Function.class, "apply",
-                            MethodType.methodType(int.class, int.class, long.class, long.class, int.class, MemorySegment.class))
-                    .bindTo(callback);
-            return Linker.nativeLinker().upcallStub(mh, match_event_handler.descriptor(), HS_LIBRARY_ARENA);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
+    private static final MemorySegment MATCH_HANDLER = HYPERSCAN_JNI.allocateMatchEventHandler(
+            (id, from, to, flags) -> {
+                HandlerContext ctx = STREAM_CALLBACK.get();
+                if (ctx == null) {
+                    return 0;
+                }
+                DualExpression expression = findExpressionById(ctx.expressions(), id);
+                if (expression == null) {
+                    expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
+                }
+                return ctx.handler().onMatch(expression, from, to) ? 0 : -1;
+            },
+            HS_LIBRARY_ARENA
+    );
 
     private record HandlerContext(DualByteMatchHandler handler, List<DualExpression> expressions) {
     }
