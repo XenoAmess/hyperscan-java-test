@@ -83,7 +83,7 @@ public class PanamaAdapter implements DualApi {
             java.lang.reflect.Method offsetMethod = UNSAFE.getClass().getDeclaredMethod("staticFieldOffset", Field.class);
             offsetMethod.setAccessible(true);
             long offset = (Long) offsetMethod.invoke(UNSAFE, field);
-            UNSAFE.putObject(base, offset, HS_LIBRARY_LOOKUP);
+            UNSAFE.putObject(base, offset, HS_LIBRARY_LOOKUP.or(Linker.nativeLinker().defaultLookup()));
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
