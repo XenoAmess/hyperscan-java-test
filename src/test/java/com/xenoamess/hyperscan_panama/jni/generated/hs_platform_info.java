@@ -8,16 +8,37 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
-import java.util.Arrays;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
-/** Compatibility facade for hs_platform_info. */
+/** Optimized compatibility facade for hs_platform_info. */
 public final class hs_platform_info {
 
     private static final Class<?> DELEGATE;
     private static final String PLATFORM_FAMILY;
-    private static final ConcurrentHashMap<String, MethodHandle> HANDLES = new ConcurrentHashMap<>();
+
+    private static final MethodHandle MH_LAYOUT;
+    private static final MethodHandle MH_TUNE_LAYOUT;
+    private static final MethodHandle MH_TUNE_OFFSET;
+    private static final MethodHandle MH_TUNE;
+    private static final MethodHandle MH_TUNE_1;
+    private static final MethodHandle MH_CPU_FEATURES_LAYOUT;
+    private static final MethodHandle MH_CPU_FEATURES_OFFSET;
+    private static final MethodHandle MH_CPU_FEATURES;
+    private static final MethodHandle MH_CPU_FEATURES_1;
+    private static final MethodHandle MH_RESERVED1_LAYOUT;
+    private static final MethodHandle MH_RESERVED1_OFFSET;
+    private static final MethodHandle MH_RESERVED1;
+    private static final MethodHandle MH_RESERVED1_1;
+    private static final MethodHandle MH_RESERVED2_LAYOUT;
+    private static final MethodHandle MH_RESERVED2_OFFSET;
+    private static final MethodHandle MH_RESERVED2;
+    private static final MethodHandle MH_RESERVED2_1;
+    private static final MethodHandle MH_ASSLICE;
+    private static final MethodHandle MH_SIZEOF;
+    private static final MethodHandle MH_ALLOCATE;
+    private static final MethodHandle MH_ALLOCATEARRAY;
+    private static final MethodHandle MH_REINTERPRET;
+    private static final MethodHandle MH_REINTERPRET_1;
 
     static {
         String platform = System.getProperty("com.xenoamess.hyperscan_panama.platform");
@@ -28,6 +49,30 @@ public final class hs_platform_info {
         String className = "com.xenoamess.hyperscan_panama.jni." + PLATFORM_FAMILY.replace('-', '_') + ".generated.hs_platform_info";
         try {
             DELEGATE = Class.forName(className);
+            // no SYMBOL_LOOKUP/LIBRARY_ARENA in functional/struct classes
+            MH_LAYOUT = find("layout", GroupLayout.class);
+            MH_TUNE_LAYOUT = find("tune$layout", ValueLayout.OfInt.class);
+            MH_TUNE_OFFSET = find("tune$offset", long.class);
+            MH_TUNE = find("tune", int.class, MemorySegment.class);
+            MH_TUNE_1 = find("tune", void.class, MemorySegment.class, int.class);
+            MH_CPU_FEATURES_LAYOUT = find("cpu_features$layout", ValueLayout.OfLong.class);
+            MH_CPU_FEATURES_OFFSET = find("cpu_features$offset", long.class);
+            MH_CPU_FEATURES = find("cpu_features", long.class, MemorySegment.class);
+            MH_CPU_FEATURES_1 = find("cpu_features", void.class, MemorySegment.class, long.class);
+            MH_RESERVED1_LAYOUT = find("reserved1$layout", ValueLayout.OfLong.class);
+            MH_RESERVED1_OFFSET = find("reserved1$offset", long.class);
+            MH_RESERVED1 = find("reserved1", long.class, MemorySegment.class);
+            MH_RESERVED1_1 = find("reserved1", void.class, MemorySegment.class, long.class);
+            MH_RESERVED2_LAYOUT = find("reserved2$layout", ValueLayout.OfLong.class);
+            MH_RESERVED2_OFFSET = find("reserved2$offset", long.class);
+            MH_RESERVED2 = find("reserved2", long.class, MemorySegment.class);
+            MH_RESERVED2_1 = find("reserved2", void.class, MemorySegment.class, long.class);
+            MH_ASSLICE = find("asSlice", MemorySegment.class, MemorySegment.class, long.class);
+            MH_SIZEOF = find("sizeof", long.class);
+            MH_ALLOCATE = find("allocate", MemorySegment.class, SegmentAllocator.class);
+            MH_ALLOCATEARRAY = find("allocateArray", MemorySegment.class, long.class, SegmentAllocator.class);
+            MH_REINTERPRET = find("reinterpret", MemorySegment.class, MemorySegment.class, Arena.class, Consumer.class);
+            MH_REINTERPRET_1 = find("reinterpret", MemorySegment.class, MemorySegment.class, long.class, Arena.class, Consumer.class);
         } catch (Throwable e) {
             throw new RuntimeException("Failed to load platform-specific hs_platform_info class: " + className, e);
         }
@@ -36,19 +81,16 @@ public final class hs_platform_info {
     private hs_platform_info() {}
 
     private static MethodHandle find(String name, Class<?> rtype, Class<?>... ptypes) {
-        String key = name + ":" + rtype.getName() + ":" + Arrays.toString(ptypes);
-        return HANDLES.computeIfAbsent(key, k -> {
-            try {
-                return MethodHandles.publicLookup().findStatic(DELEGATE, name, MethodType.methodType(rtype, ptypes));
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to find method " + name + " in " + DELEGATE.getName(), e);
-            }
-        });
+        try {
+            return MethodHandles.publicLookup().findStatic(DELEGATE, name, MethodType.methodType(rtype, ptypes));
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to find method " + name + " in " + DELEGATE.getName(), e);
+        }
     }
 
     public static GroupLayout layout() {
         try {
-            return (GroupLayout) find("layout", GroupLayout.class).invokeExact();
+            return (GroupLayout) MH_LAYOUT.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -56,7 +98,7 @@ public final class hs_platform_info {
 
     public static ValueLayout.OfInt tune$layout() {
         try {
-            return (ValueLayout.OfInt) find("tune$layout", ValueLayout.OfInt.class).invokeExact();
+            return (ValueLayout.OfInt) MH_TUNE_LAYOUT.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -64,7 +106,7 @@ public final class hs_platform_info {
 
     public static long tune$offset() {
         try {
-            return (long) find("tune$offset", long.class).invokeExact();
+            return (long) MH_TUNE_OFFSET.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -72,7 +114,7 @@ public final class hs_platform_info {
 
     public static int tune(MemorySegment arg0) {
         try {
-            return (int) find("tune", int.class, MemorySegment.class).invokeExact(arg0);
+            return (int) MH_TUNE.invokeExact(arg0);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -80,7 +122,7 @@ public final class hs_platform_info {
 
     public static void tune(MemorySegment arg0, int arg1) {
         try {
-            find("tune", void.class, MemorySegment.class, int.class).invokeExact(arg0, arg1);
+            MH_TUNE_1.invokeExact(arg0, arg1);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -88,7 +130,7 @@ public final class hs_platform_info {
 
     public static ValueLayout.OfLong cpu_features$layout() {
         try {
-            return (ValueLayout.OfLong) find("cpu_features$layout", ValueLayout.OfLong.class).invokeExact();
+            return (ValueLayout.OfLong) MH_CPU_FEATURES_LAYOUT.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -96,7 +138,7 @@ public final class hs_platform_info {
 
     public static long cpu_features$offset() {
         try {
-            return (long) find("cpu_features$offset", long.class).invokeExact();
+            return (long) MH_CPU_FEATURES_OFFSET.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -104,7 +146,7 @@ public final class hs_platform_info {
 
     public static long cpu_features(MemorySegment arg0) {
         try {
-            return (long) find("cpu_features", long.class, MemorySegment.class).invokeExact(arg0);
+            return (long) MH_CPU_FEATURES.invokeExact(arg0);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -112,7 +154,7 @@ public final class hs_platform_info {
 
     public static void cpu_features(MemorySegment arg0, long arg1) {
         try {
-            find("cpu_features", void.class, MemorySegment.class, long.class).invokeExact(arg0, arg1);
+            MH_CPU_FEATURES_1.invokeExact(arg0, arg1);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -120,7 +162,7 @@ public final class hs_platform_info {
 
     public static ValueLayout.OfLong reserved1$layout() {
         try {
-            return (ValueLayout.OfLong) find("reserved1$layout", ValueLayout.OfLong.class).invokeExact();
+            return (ValueLayout.OfLong) MH_RESERVED1_LAYOUT.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -128,7 +170,7 @@ public final class hs_platform_info {
 
     public static long reserved1$offset() {
         try {
-            return (long) find("reserved1$offset", long.class).invokeExact();
+            return (long) MH_RESERVED1_OFFSET.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -136,7 +178,7 @@ public final class hs_platform_info {
 
     public static long reserved1(MemorySegment arg0) {
         try {
-            return (long) find("reserved1", long.class, MemorySegment.class).invokeExact(arg0);
+            return (long) MH_RESERVED1.invokeExact(arg0);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -144,7 +186,7 @@ public final class hs_platform_info {
 
     public static void reserved1(MemorySegment arg0, long arg1) {
         try {
-            find("reserved1", void.class, MemorySegment.class, long.class).invokeExact(arg0, arg1);
+            MH_RESERVED1_1.invokeExact(arg0, arg1);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -152,7 +194,7 @@ public final class hs_platform_info {
 
     public static ValueLayout.OfLong reserved2$layout() {
         try {
-            return (ValueLayout.OfLong) find("reserved2$layout", ValueLayout.OfLong.class).invokeExact();
+            return (ValueLayout.OfLong) MH_RESERVED2_LAYOUT.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -160,7 +202,7 @@ public final class hs_platform_info {
 
     public static long reserved2$offset() {
         try {
-            return (long) find("reserved2$offset", long.class).invokeExact();
+            return (long) MH_RESERVED2_OFFSET.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -168,7 +210,7 @@ public final class hs_platform_info {
 
     public static long reserved2(MemorySegment arg0) {
         try {
-            return (long) find("reserved2", long.class, MemorySegment.class).invokeExact(arg0);
+            return (long) MH_RESERVED2.invokeExact(arg0);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -176,7 +218,7 @@ public final class hs_platform_info {
 
     public static void reserved2(MemorySegment arg0, long arg1) {
         try {
-            find("reserved2", void.class, MemorySegment.class, long.class).invokeExact(arg0, arg1);
+            MH_RESERVED2_1.invokeExact(arg0, arg1);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -184,7 +226,7 @@ public final class hs_platform_info {
 
     public static MemorySegment asSlice(MemorySegment arg0, long arg1) {
         try {
-            return (MemorySegment) find("asSlice", MemorySegment.class, MemorySegment.class, long.class).invokeExact(arg0, arg1);
+            return (MemorySegment) MH_ASSLICE.invokeExact(arg0, arg1);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -192,7 +234,7 @@ public final class hs_platform_info {
 
     public static long sizeof() {
         try {
-            return (long) find("sizeof", long.class).invokeExact();
+            return (long) MH_SIZEOF.invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -200,7 +242,7 @@ public final class hs_platform_info {
 
     public static MemorySegment allocate(SegmentAllocator arg0) {
         try {
-            return (MemorySegment) find("allocate", MemorySegment.class, SegmentAllocator.class).invokeExact(arg0);
+            return (MemorySegment) MH_ALLOCATE.invokeExact(arg0);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -208,7 +250,7 @@ public final class hs_platform_info {
 
     public static MemorySegment allocateArray(long arg0, SegmentAllocator arg1) {
         try {
-            return (MemorySegment) find("allocateArray", MemorySegment.class, long.class, SegmentAllocator.class).invokeExact(arg0, arg1);
+            return (MemorySegment) MH_ALLOCATEARRAY.invokeExact(arg0, arg1);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -216,7 +258,7 @@ public final class hs_platform_info {
 
     public static MemorySegment reinterpret(MemorySegment arg0, Arena arg1, Consumer<MemorySegment> arg2) {
         try {
-            return (MemorySegment) find("reinterpret", MemorySegment.class, MemorySegment.class, Arena.class, Consumer.class).invokeExact(arg0, arg1, arg2);
+            return (MemorySegment) MH_REINTERPRET.invokeExact(arg0, arg1, arg2);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -224,7 +266,7 @@ public final class hs_platform_info {
 
     public static MemorySegment reinterpret(MemorySegment arg0, long arg1, Arena arg2, Consumer<MemorySegment> arg3) {
         try {
-            return (MemorySegment) find("reinterpret", MemorySegment.class, MemorySegment.class, long.class, Arena.class, Consumer.class).invokeExact(arg0, arg1, arg2, arg3);
+            return (MemorySegment) MH_REINTERPRET_1.invokeExact(arg0, arg1, arg2, arg3);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
