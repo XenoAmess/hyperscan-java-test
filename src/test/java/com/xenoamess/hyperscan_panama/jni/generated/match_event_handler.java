@@ -30,9 +30,9 @@ public final class match_event_handler {
             DELEGATE = Class.forName(className);
             // no SYMBOL_LOOKUP/LIBRARY_ARENA in functional/struct classes
             PLATFORM_FUNCTION_CLASS = Class.forName("com.xenoamess.hyperscan_panama.jni." + PLATFORM_FAMILY.replace('-', '_') + ".generated.match_event_handler$Function");
-            MH_DESCRIPTOR = find("descriptor", FunctionDescriptor.class);
-            MH_ALLOCATE = find("allocate", MemorySegment.class, PLATFORM_FUNCTION_CLASS, Arena.class);
-            MH_INVOKE = find("invoke", int.class, MemorySegment.class, int.class, long.class, long.class, int.class, MemorySegment.class);
+            MH_DESCRIPTOR = findOrNull("descriptor", FunctionDescriptor.class);
+            MH_ALLOCATE = findOrNull("allocate", MemorySegment.class, PLATFORM_FUNCTION_CLASS, Arena.class);
+            MH_INVOKE = findOrNull("invoke", int.class, MemorySegment.class, int.class, long.class, long.class, int.class, MemorySegment.class);
         } catch (Throwable e) {
             throw new RuntimeException("Failed to load platform-specific match_event_handler class: " + className, e);
         }
@@ -40,12 +40,19 @@ public final class match_event_handler {
 
     private match_event_handler() {}
 
-    private static MethodHandle find(String name, Class<?> rtype, Class<?>... ptypes) {
+    private static MethodHandle findOrNull(String name, Class<?> rtype, Class<?>... ptypes) {
         try {
             return MethodHandles.publicLookup().findStatic(DELEGATE, name, MethodType.methodType(rtype, ptypes));
         } catch (Exception e) {
-            throw new RuntimeException("Failed to find method " + name + " in " + DELEGATE.getName(), e);
+            return null;
         }
+    }
+
+    private static MethodHandle require(String name, MethodHandle mh) {
+        if (mh == null) {
+            throw new RuntimeException("Method not available on this platform: " + name);
+        }
+        return mh;
     }
 
     @FunctionalInterface
@@ -55,7 +62,7 @@ public final class match_event_handler {
 
     public static FunctionDescriptor descriptor() {
         try {
-            return (FunctionDescriptor) MH_DESCRIPTOR.invokeExact();
+            return (FunctionDescriptor) require("descriptor", MH_DESCRIPTOR).invokeExact();
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -65,7 +72,7 @@ public final class match_event_handler {
         try {
             MethodHandle mh = MethodHandles.lookup().findVirtual(Function.class, "apply", MethodType.methodType(int.class, int.class, long.class, long.class, int.class, MemorySegment.class)).bindTo(arg0);
             Object platformFi = MethodHandleProxies.asInterfaceInstance(PLATFORM_FUNCTION_CLASS, mh);
-            return (MemorySegment) MH_ALLOCATE.invoke(platformFi, arg1);
+            return (MemorySegment) require("allocate", MH_ALLOCATE).invoke(platformFi, arg1);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -73,7 +80,7 @@ public final class match_event_handler {
 
     public static int invoke(MemorySegment arg0, int arg1, long arg2, long arg3, int arg4, MemorySegment arg5) {
         try {
-            return (int) MH_INVOKE.invokeExact(arg0, arg1, arg2, arg3, arg4, arg5);
+            return (int) require("invoke", MH_INVOKE).invokeExact(arg0, arg1, arg2, arg3, arg4, arg5);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
