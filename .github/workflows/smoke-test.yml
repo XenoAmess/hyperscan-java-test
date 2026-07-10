@@ -89,7 +89,19 @@ jobs:
       - name: Collect CPU information (Linux)
         if: matrix.os == 'linux'
         run: |
-          MODEL=$(grep -m1 'model name' /proc/cpuinfo | sed 's/^.*: //' || echo 'unknown')
+          MODEL=$(grep -m1 'model name' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+          if [ -z "$MODEL" ]; then
+            IMPL=$(grep -m1 'CPU implementer' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            PART=$(grep -m1 'CPU part' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            VARIANT=$(grep -m1 'CPU variant' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            ARCH=$(grep -m1 'CPU architecture' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            if [ -n "$IMPL" ] && [ -n "$PART" ]; then
+              MODEL="ARM implementer=${IMPL} part=${PART} variant=${VARIANT} arch=${ARCH}"
+            fi
+          fi
+          if [ -z "$MODEL" ]; then
+            MODEL='unknown'
+          fi
           FLAGS=$(grep -m1 '^flags' /proc/cpuinfo | sed 's/^.*: //' || grep -m1 '^Features' /proc/cpuinfo | sed 's/^.*: //' || echo 'unknown')
           echo "CPU_MODEL=$MODEL" >> "$GITHUB_ENV"
           echo "CPU_FLAGS=$FLAGS" >> "$GITHUB_ENV"
@@ -100,7 +112,7 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          $model = (Get-CimInstance Win32_Processor).Name
+          $model = (Get-CimInstance Win32_Processor).Name.Trim()
           if (-not $model) { $model = 'unknown' }
           "CPU_MODEL=$model" >> $env:GITHUB_ENV
           "CPU_FLAGS=unknown" >> $env:GITHUB_ENV

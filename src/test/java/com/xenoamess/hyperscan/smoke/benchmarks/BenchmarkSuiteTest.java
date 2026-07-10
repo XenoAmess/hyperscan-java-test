@@ -507,7 +507,7 @@ class BenchmarkSuiteTest {
             }
         }
         String env = System.getenv("CPU_MODEL");
-        return env == null ? "" : env;
+        return env == null ? "" : env.trim();
     }
 
     private static String readCpuFlags() {
@@ -526,7 +526,7 @@ class BenchmarkSuiteTest {
             }
         }
         String env = System.getenv("CPU_FLAGS");
-        return env == null ? "" : env;
+        return env == null ? "" : env.trim();
     }
 
     private static List<DualExpression> buildCrossPlatformExpressions(DualApi api, int count) {
