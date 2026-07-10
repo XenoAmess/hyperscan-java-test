@@ -13,7 +13,7 @@
 | **直接 `Linker.upcallStub` 回调** | `src/test/java/com/xenoamess/hyperscan/smoke/dual/PanamaAdapter.java`<br>commit `8373082` | `hyperscan-java-panama` | **高** | `HyperscanJniImpl.allocateMatchEventHandler` 现在仍走 `match_event_handler.allocate(...)` → `MethodHandleProxies` 代理。可直接用 `Linker.upcallStub` 省一层代理。 |
 | **静态 `match_event_handler` + ThreadLocal 复用** | `src/test/java/com/xenoamess/hyperscan/smoke/HyperscanTestHelper.java` / `PanamaAdapter.java`<br>commit `cdf50fc` | `hyperscan-java-panama` | 已存在 | `hyperscan-java-panama/wrapper/Scanner.java` 里已经是 `CALLBACK_ARENA = Arena.global()` + `ThreadLocal<RawMatchEventHandler>` 模式，无需迁移。 |
 | **Arena / Scratch 生命周期管理** | `PanamaAdapter.java` / `HyperscanTestHelper.java` | `hyperscan-java-panama` | 中低 | 可审计 wrapper 中大量 `try (Arena arena = Arena.ofConfined())` 是否能复用或避免重复创建。 |
-| **原生库编译参数调优** | `hyperscan-java-native` 的 `build.sh` / `pom.xml` | `hyperscan-java-native` + `hyperscan-java-panama/native` | **高** | 剩余 `scanGigabytes*` 回归主要在大块输入扫描，差距来自原生库本身。需要统一/比较 JavaCPP 与 Panama 的 Vectorscan 编译参数（`MARCH`、`BUILD_AVX*`、`-O3`、LTO 等）。 |
+| **原生库编译参数调优** | `hyperscan-java-native` 的 `build.sh` / `pom.xml` | `hyperscan-java-native` + `hyperscan-java-panama/native` | **高** | 已核对：`build.sh` 中 Vectorscan 编译参数（`MARCH`、`BUILD_AVX*`、`FAT_RUNTIME`、`-O3` 等）在 Linux 下已完全一致；差异仅在脚本末尾的 Maven 调用方式。Windows 构建脚本存在差异（VS vs Ninja），但与当前 Linux `scanGigabytes*` 回归无直接关联。需进一步排查原生库本身或加载/variant 选择逻辑。 |
 | **全局 warm-up / 确定性数据生成** | `InstructionSetGranularityTest.java` / `BenchmarkSuiteTest`<br>commit `cdf50fc` | `hyperscan-java-panama/performance` | 中 | 若 `hyperscan-java-panama` 有独立性能测试模块，可同步 warm-up 逻辑与确定性 seed 数据生成。 |
 
 ---
@@ -48,13 +48,14 @@
 
 #### 2. 审计并复用 `hs_alloc_t` / `hs_free_t` 的直接 upcall stub
 
-- 若 `hyperscan-java-panama` 的自定义 allocator 路径也经过 `hs_alloc_t.allocate` / `hs_free_t.allocate`，同样可改为 `Linker.upcallStub`。
-- 目标文件：`HyperscanJniImpl.java` 或 wrapper 中自定义 allocator 相关代码。
+- 当前 `HyperscanJni` 接口未暴露自定义 allocator 路径（`hs_alloc_t` / `hs_free_t`），wrapper 中亦未使用。此项不适用，无需迁移。
+- 若未来在 `HyperscanJni` 中增加自定义 allocator 支持，可复用 `MethodHandle.dropArguments` + `Linker.upcallStub` 模式。
 
 #### 3. 同步 benchmark warm-up 与确定性数据生成
 
-- 检查 `hyperscan-java-panama/performance` 是否有类似 `InstructionSetGranularityTest` 的随机/非确定性数据生成。
-- 统一 warm-up 次数、确定性 seed、scratch 释放等 benchmark 基础设施。
+- 已检查 `hyperscan-java-panama/performance/BenchmarkSuiteTest.java`：该模块已实现 `@BeforeAll warmUp()`，且所有 `Random` 实例均使用固定 seed（2026/2027/2028/2029/42/2030 等），数据生成已确定性化。
+- `hyperscan-java-test` 侧在 commit `cdf50fc` 也已统一 warm-up 与 seed；两边理念一致，无需额外同步。
+- 后续可关注 `hyperscan-java-panama/performance` 是否补充与 `hyperscan-java-test` 等价的流式扫描（streaming / `scanGigabytes*`）基准。
 
 ---
 
@@ -62,13 +63,12 @@
 
 #### 4. 统一 JavaCPP 与 Panama 的 Vectorscan 编译参数
 
-- 对比 `hyperscan-java-native/build.sh` 与 `hyperscan-java-panama/native/build.sh`：
-  - `CMAKE_BUILD_TYPE=Release`
-  - `MARCH` / `BUILD_AVX2` / `BUILD_AVX512` / `BUILD_AVX512VBMI`
-  - `FAT_RUNTIME=off`
-  - 是否开启 LTO、PGO、`-O3`、`-DNDEBUG`
-- 确保两个仓库对同一 platform variant（如 `linux-x86_64-baseline`）使用等价的编译优化级别。
-- **预期收益**：消除 `scanGigabytes*` 这类原生主导型基准的差距。
+- 已对比 `hyperscan-java-native/build.sh` 与 `hyperscan-java-panama/native/build.sh`：
+  - 两个脚本在 Linux/macOS 下的 Vectorscan 构建部分（`CMAKE_BUILD_TYPE=Release`、`MARCH`、`BUILD_AVX2/AVX512/AVX512VBMI/SVE/SVE2`、`FAT_RUNTIME=off`、`BUILD_SHARED_LIBS=on`、`-DBUILD_BENCHMARKS=false` 等）完全一致。
+  - 唯一差异在脚本末尾：`hyperscan-java-native` 直接调用 `mvn ... -Dorg.bytedeco.javacpp.platform=$DETECTED_PLATFORM` 生成 JavaCPP 绑定；`hyperscan-java-panama/native/build.sh` 仅构建原生库，不生成 Java 绑定。
+  - Windows 脚本差异较大（Visual Studio 2026 + MSBuild vs Ninja），但当前主要 Linux 回归与 Windows 构建无关。
+- 结论：原生编译参数已在 Linux 对齐，剩余 `scanGigabytes*` 差距不宜再通过调整编译参数解决。
+- 下一步建议：比对两个仓库发布的原生 `.so` 文件（objdump/二进制 diff）或检查 variant 选择/加载逻辑是否导致运行时选用了不同优化级别的库。
 
 #### 5. 评估原生库选择 / 向量扫描 fork
 
@@ -94,18 +94,21 @@
 ## 三、执行顺序
 
 1. **先做 `hyperscan-java-panama` 的 direct upcall stub 优化**（高优先级、影响明确、可复用回调模式）。
+   - **状态**：已完成，commit `100ed5b`。
 2. **同时或紧随其后做原生编译参数对齐**（解决剩余 `scanGigabytes*` 回归）。
+   - **状态**：已核对，Linux 下参数已对齐；剩余回归需进一步排查原生库/加载逻辑。
 3. 完成后重新跑 `hyperscan-java-test` CI，验证回归是否进一步缩小。
-4. 若仍有差距，再进入低优先级项（Arena 复用、封装层开销）。
+4. 若仍有差距，再进入低优先级项（Arena 复用、封装层开销、variant 选择逻辑）。
 
 ---
 
 ## 四、状态追踪
 
-- [ ] 创建本文档
-- [ ] `hyperscan-java-panama`：`allocateMatchEventHandler` 改为直接 upcall stub
-- [ ] `hyperscan-java-panama`：审计 `hs_alloc_t` / `hs_free_t` 是否同样可优化
-- [ ] `hyperscan-java-panama/performance`：同步 warm-up / 确定性数据生成
-- [ ] `hyperscan-java-native` / `hyperscan-java-panama/native`：对齐 Vectorscan 编译参数
-- [ ] 重新跑 `hyperscan-java-test` CI 验证
+- [x] 创建本文档
+- [x] `hyperscan-java-panama`：`allocateMatchEventHandler` 改为直接 upcall stub
+- [x] `hyperscan-java-panama`：审计 `hs_alloc_t` / `hs_free_t` 是否同样可优化（结论：不适用）
+- [x] `hyperscan-java-panama/performance`：同步 warm-up / 确定性数据生成（结论：已具备）
+- [x] `hyperscan-java-native` / `hyperscan-java-panama/native`：对齐 Vectorscan 编译参数（结论：Linux 已对齐）
+- [ ] 重新跑 `hyperscan-java-test` CI 验证（待 `hyperscan-java-panama` 新发布版本后触发）
+- [ ] 可选：排查剩余 `scanGigabytes*` 回归（原生库/加载/variant 选择）
 - [ ] 可选：Arena 复用审计、封装层开销优化
