@@ -100,7 +100,11 @@ class LiteralsTest {
 
         int modeBits = modeBits(api, params);
         DualCompileResult compileResult = api.compileRaw(expressions, modeBits);
-        assertThat(compileResult.code()).isEqualTo(api.success());
+        assertThat(compileResult.code())
+                .withFailMessage(() -> String.format("compile failed for %s %s: %s (code %d)",
+                        api.getClass().getSimpleName(), params, compileResult.message(),
+                        compileResult.code()))
+                .isEqualTo(api.success());
         DualDatabase db = compileResult.database();
         try {
             CountingHandler handler = new CountingHandler();
