@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import sys
 from html import escape
 from datetime import datetime, timezone
@@ -43,6 +44,10 @@ def format_num(value, decimals=2):
         return f'{float(value):,.{decimals}f}'
     except (ValueError, TypeError):
         return str(value)
+
+
+def sanitize_filename(name):
+    return re.sub(r'[^A-Za-z0-9_-]+', '_', name)
 
 
 def implementation_for(result):
@@ -196,6 +201,86 @@ def build_scenario_rows(results, scenario_name):
         })
     rows.sort(key=lambda x: (x['platform'], x['implementation']))
     return rows
+
+
+def build_scenario_chart_rows(results, scenario_name):
+    by_platform = {}
+    for r in results:
+        platform = safe_get(r, 'platform', default='unknown')
+        impl = implementation_for(r)
+        by_platform.setdefault(platform, {})[impl] = r
+
+    rows = []
+    for platform, impls in by_platform.items():
+        javacpp = impls.get('javacpp')
+        panama = impls.get('panama')
+        javacpp_tp = throughput_for(javacpp, scenario_name) if javacpp else 0.0
+        panama_tp = throughput_for(panama, scenario_name) if panama else 0.0
+        javacpp_ops = ops_per_second_for(javacpp, scenario_name) or 0.0 if javacpp else 0.0
+        panama_ops = ops_per_second_for(panama, scenario_name) or 0.0 if panama else 0.0
+
+        metric_type = None
+        javacpp_value = 0.0
+        panama_value = 0.0
+        if javacpp_tp > 0 or panama_tp > 0:
+            metric_type = 'throughput'
+            javacpp_value = javacpp_tp
+            panama_value = panama_tp
+        elif javacpp_ops > 0 or panama_ops > 0:
+            metric_type = 'ops'
+            javacpp_value = javacpp_ops
+            panama_value = panama_ops
+
+        if metric_type is None:
+            continue
+
+        rows.append({
+            'platform': platform,
+            'javacpp': javacpp_value,
+            'panama': panama_value,
+            'metric_type': metric_type
+        })
+
+    rows.sort(key=lambda x: max(x['javacpp'], x['panama']), reverse=True)
+    return rows
+
+
+def render_scenario_chart(html, rows, scenario_name, svg_link=None):
+    if not rows:
+        return
+    max_value = max(max(r['javacpp'], r['panama']) for r in rows)
+    if max_value <= 0:
+        return
+
+    metric_type = rows[0]['metric_type']
+    unit = 'MB/s' if metric_type == 'throughput' else 'ops/s'
+    label = 'Throughput' if metric_type == 'throughput' else 'Ops/Second'
+
+    html.append(f'    <h4>{escape(label)} Comparison</h4>')
+    if svg_link:
+        html.append(f'    <p style="font-size: 0.85rem;"><a href="{escape(svg_link)}">View as SVG</a></p>')
+
+    for row in rows:
+        javacpp_width = row['javacpp'] / max_value * 100 if max_value > 0 else 0
+        panama_width = row['panama'] / max_value * 100 if max_value > 0 else 0
+
+        html.append('    <div style="margin-bottom: 0.75rem;">')
+        html.append(f'      <div style="margin-bottom: 0.25rem; font-size: 0.9rem;">{escape(row["platform"])}</div>')
+        html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">')
+        html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">JavaCPP</div>')
+        html.append('        <div class="bar-bg" style="flex: 1;">')
+        html.append(f'          <div class="bar-fill" style="width: {javacpp_width:.1f}%;"></div>')
+        html.append('        </div>')
+        html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["javacpp"]))} {unit}</div>')
+        html.append('      </div>')
+        html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem;">')
+        html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">Panama</div>')
+        html.append('        <div class="bar-bg" style="flex: 1;">')
+        html.append(f'          <div class="bar-fill" style="width: {panama_width:.1f}%; background: #0969da;"></div>')
+        html.append('        </div>')
+        html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["panama"]))} {unit}</div>')
+        html.append('      </div>')
+        html.append('    </div>')
 
 
 def generate_html(results, output_file, native_version, commit_sha):
@@ -388,6 +473,9 @@ def generate_html(results, output_file, native_version, commit_sha):
     html.append('    <h2>Per-Benchmark Cross-Platform Comparison</h2>')
     for scenario in scenarios:
         html.append(f'    <h3>{escape(scenario)}</h3>')
+        scenario_chart_rows = build_scenario_chart_rows(results, scenario)
+        scenario_svg_link = f"scenarios/{sanitize_filename(scenario)}.svg"
+        render_scenario_chart(html, scenario_chart_rows, scenario, scenario_svg_link)
         scenario_rows = build_scenario_rows(results, scenario)
         html.append('    <table class="scenario-table">')
         html.append('      <tr>')

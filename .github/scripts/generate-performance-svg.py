@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import sys
 from html import escape
 from datetime import datetime, timezone
@@ -89,6 +90,20 @@ def fixed_workload_scenario(results):
             if safe_get(find_benchmark(r, name), 'metrics', 'throughputMBpsAvg'):
                 return name
     return sorted(names)[0] if names else None
+
+
+def scenario_names(results):
+    names = set()
+    for r in results:
+        for bench in safe_get(r, 'benchmarks', default=[]):
+            name = safe_get(bench, 'name')
+            if name:
+                names.add(name)
+    return sorted(names)
+
+
+def sanitize_filename(name):
+    return re.sub(r'[^A-Za-z0-9_-]+', '_', name)
 
 
 def build_platform_rows(results, scenario_name):
@@ -226,6 +241,19 @@ def main():
     if not results:
         print('No benchmark results found in input directory.', file=sys.stderr)
         sys.exit(1)
+
+    if output_file.endswith('/') or output_file.endswith(os.sep) or os.path.isdir(output_file):
+        os.makedirs(output_file, exist_ok=True)
+        scenarios = scenario_names(results)
+        for s in scenarios:
+            filename = sanitize_filename(s) + '.svg'
+            path = os.path.join(output_file, filename)
+            generate_svg(results, path, native_version, commit_sha, s)
+        summary_path = os.path.join(output_file, 'performance-summary.svg')
+        summary_scenario = fixed_workload_scenario(results)
+        generate_svg(results, summary_path, native_version, commit_sha, summary_scenario)
+        print(f'Per-scenario SVGs generated in: {output_file}')
+        return
 
     if scenario is None:
         scenario = fixed_workload_scenario(results)
