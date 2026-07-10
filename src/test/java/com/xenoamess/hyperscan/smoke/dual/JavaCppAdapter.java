@@ -861,13 +861,16 @@ public class JavaCppAdapter implements DualApi {
         PointerPointer<BytePointer> expressionsPtr = null;
         IntPointer flags = null;
         IntPointer ids = null;
+        List<BytePointer> exprPointers = new ArrayList<>();
         if (n > 0) {
             expressionsPtr = new PointerPointer<>(n);
             flags = new IntPointer(n);
             ids = new IntPointer(n);
             for (int i = 0; i < n; i++) {
                 DualExpression expr = expressions.get(i);
-                expressionsPtr.put(i, new BytePointer(expr.pattern()));
+                BytePointer bp = new BytePointer(expr.pattern());
+                exprPointers.add(bp);
+                expressionsPtr.put(i, bp);
                 flags.put(i, toFlagBits(expr.flags()));
                 ids.put(i, expr.id() != null ? expr.id() : 0);
             }
