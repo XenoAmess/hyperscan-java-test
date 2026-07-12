@@ -148,7 +148,7 @@ jobs:
         if: steps.cpu-check.outputs.SKIPPED != 'true'
         run: |
           set -euo pipefail
-          mvn -B test \
+          mvn -B -U test \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
             -Djavacpp.platform=${{ matrix.platform }} \
             -Dhyperscan.benchmarks.enabled=false \
@@ -301,7 +301,7 @@ jobs:
         if: steps.cpu-check.outputs.SKIPPED != 'true'
         run: |
           set -euo pipefail
-          mvn -B test \
+          mvn -B -U test \
             -Dtest=JmhBenchmarkRunner \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
             -Djavacpp.platform=${{ matrix.platform }} \
