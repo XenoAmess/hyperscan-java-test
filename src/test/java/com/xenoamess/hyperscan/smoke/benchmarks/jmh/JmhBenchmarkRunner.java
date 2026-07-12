@@ -48,12 +48,18 @@ public class JmhBenchmarkRunner {
             jvmArgs.add("-Dhyperscan.benchmarks.large.enabled=true");
         }
 
-        ChainedOptionsBuilder builder = new OptionsBuilder()
-                .include("com\\.xenoamess\\.hyperscan\\.smoke\\.benchmarks\\.jmh\\..*")
-                .jvmArgsAppend(jvmArgs.toArray(new String[0]));
+        ChainedOptionsBuilder builder = new OptionsBuilder();
+        String include = System.getProperty("jmh.include");
+        if (include != null && !include.isEmpty()) {
+            builder.include(include);
+        } else {
+            builder.include("com\\.xenoamess\\.hyperscan\\.smoke\\.benchmarks\\.jmh\\..*");
+        }
+        builder.jvmArgsAppend(jvmArgs.toArray(new String[0]));
         if (!largeEnabled) {
             builder.exclude("com\\.xenoamess\\.hyperscan\\.smoke\\.benchmarks\\.jmh\\.large\\..*");
         }
+        addProfilers(builder);
         Options options = builder.build();
 
         Collection<RunResult> runResults = new Runner(options).run();
@@ -82,6 +88,26 @@ public class JmhBenchmarkRunner {
                 benchmarkResults
         );
         recorder.write();
+    }
+
+    private static void addProfilers(ChainedOptionsBuilder builder) {
+        String profilers = System.getProperty("jmh.profilers");
+        if (profilers == null || profilers.isEmpty()) {
+            return;
+        }
+        for (String spec : profilers.split(",")) {
+            String trimmed = spec.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            String[] parts = trimmed.split(":", 2);
+            String name = parts[0].trim();
+            if (parts.length == 1) {
+                builder.addProfiler(name);
+            } else {
+                builder.addProfiler(name, parts[1].trim());
+            }
+        }
     }
 
     private static String readCpuModel() {
