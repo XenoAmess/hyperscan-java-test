@@ -78,7 +78,11 @@ public class JavaCppAdapter implements DualApi {
             if (ctx == null) {
                 return 0;
             }
-            DualExpression expression = findExpressionById(ctx.expressions(), id);
+            DualExpression expression = null;
+            DualExpression[] byId = ctx.expressionsById();
+            if (id >= 0 && id < byId.length) {
+                expression = byId[id];
+            }
             if (expression == null) {
                 expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
             }
@@ -356,7 +360,29 @@ public class JavaCppAdapter implements DualApi {
         ext.hamming_distance(src.hammingDistance());
     }
 
-    private record HandlerContext(DualByteMatchHandler handler, List<DualExpression> expressions) {
+    private record HandlerContext(DualByteMatchHandler handler, DualExpression[] expressionsById) {
+    }
+
+    private static DualExpression[] buildExpressionLookup(List<DualExpression> expressions) {
+        int maxId = -1;
+        for (DualExpression expr : expressions) {
+            int id = expr.id() == null ? 0 : expr.id();
+            if (id > maxId) {
+                maxId = id;
+            }
+        }
+        DualExpression[] byId = new DualExpression[maxId + 1];
+        for (DualExpression expr : expressions) {
+            int id = expr.id() == null ? 0 : expr.id();
+            if (id >= 0) {
+                byId[id] = expr;
+            }
+        }
+        return byId;
+    }
+
+    private static HandlerContext newHandlerContext(DualByteMatchHandler handler, List<DualExpression> expressions) {
+        return new HandlerContext(handler, buildExpressionLookup(expressions));
     }
 
     @Override
@@ -461,7 +487,7 @@ public class JavaCppAdapter implements DualApi {
         }
         List<DualExpression> expressions = expressionsOf(database);
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
         }
         try (BytePointer data = newBytePointer(input)) {
             int length = input == null ? 4 : input.length;
@@ -488,7 +514,7 @@ public class JavaCppAdapter implements DualApi {
         }
         List<DualExpression> expressions = expressionsOf(database);
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
         }
         try (BytePointer data = newBytePointer(input)) {
             int length = input == null ? 4 : input.remaining();
@@ -542,7 +568,7 @@ public class JavaCppAdapter implements DualApi {
             throw new IllegalStateException("Stream is already closed");
         }
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try (BytePointer data = newBytePointer(input)) {
             int length = input == null ? 4 : input.length;
@@ -564,7 +590,7 @@ public class JavaCppAdapter implements DualApi {
             throw new IllegalStateException("Stream is already closed");
         }
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try (BytePointer data = newBytePointer(input)) {
             int length = input == null ? 4 : input.remaining();
@@ -587,7 +613,7 @@ public class JavaCppAdapter implements DualApi {
         }
         s.closed = true;
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try {
             int result = hyperscan.hs_close_stream(s.stream, s.scratch, MATCH_HANDLER, null);
@@ -607,7 +633,7 @@ public class JavaCppAdapter implements DualApi {
         hs_database_t db = nativeDatabase(database);
         List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
         }
         int[] lengths = new int[input.length];
         for (int i = 0; i < input.length; i++) {
@@ -628,6 +654,52 @@ public class JavaCppAdapter implements DualApi {
                 checkResult(hyperscan.hs_free_scratch(scratch));
             }
         } finally {
+            if (handler != null) {
+                STREAM_CALLBACK.remove();
+            }
+        }
+    }
+
+    @Override
+    public void scanVector(DualScanner scanner, DualDatabase database, ByteBuffer[] input, DualByteMatchHandler handler) {
+        hs_database_t db = nativeDatabase(database);
+        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
+        if (handler != null) {
+            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+        }
+        int n = input == null ? 0 : input.length;
+        int[] lengths = new int[n];
+        BytePointer[] pointers = new BytePointer[n];
+        for (int i = 0; i < n; i++) {
+            ByteBuffer buffer = input[i];
+            if (buffer == null) {
+                lengths[i] = 4;
+                pointers[i] = new BytePointer();
+            } else {
+                lengths[i] = buffer.remaining();
+                pointers[i] = newBytePointer(buffer);
+            }
+        }
+        try (PointerPointer<BytePointer> data = new PointerPointer<>(pointers);
+             IntPointer lengthPtr = new IntPointer(lengths);
+             PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
+            scratchOut.put(0, new hs_scratch_t());
+            checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
+            hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
+            try {
+                int result = hyperscan.hs_scan_vector(db, data, lengthPtr, n, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
+                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                    checkResult(result);
+                }
+            } finally {
+                checkResult(hyperscan.hs_free_scratch(scratch));
+            }
+        } finally {
+            for (BytePointer bp : pointers) {
+                if (bp != null) {
+                    bp.close();
+                }
+            }
             if (handler != null) {
                 STREAM_CALLBACK.remove();
             }
@@ -1344,7 +1416,7 @@ public class JavaCppAdapter implements DualApi {
         JavaCppStream s = (JavaCppStream) stream;
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try (BytePointer data = input == null ? new BytePointer() : new BytePointer(input.length)) {
             if (input != null) {
@@ -1371,7 +1443,7 @@ public class JavaCppAdapter implements DualApi {
         s.closed = true;
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try {
             return hyperscan.hs_close_stream(s.stream, scratch, handler == null ? null : MATCH_HANDLER, null);
@@ -1391,7 +1463,7 @@ public class JavaCppAdapter implements DualApi {
         JavaCppStream s = (JavaCppStream) stream;
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try {
             return hyperscan.hs_reset_stream(s.stream, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
@@ -1431,7 +1503,7 @@ public class JavaCppAdapter implements DualApi {
         JavaCppStream fromStream = (JavaCppStream) from;
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, toStream.expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, toStream.expressions));
         }
         try {
             return hyperscan.hs_reset_and_copy_stream(toStream.stream, fromStream.stream, scratch, handler == null ? null : MATCH_HANDLER, null);
@@ -1451,7 +1523,7 @@ public class JavaCppAdapter implements DualApi {
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
         }
         try (BytePointer data = input == null ? new BytePointer() : new BytePointer(input.length)) {
             if (input != null) {
@@ -1475,7 +1547,7 @@ public class JavaCppAdapter implements DualApi {
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
         }
         try {
             if (input == null) {
@@ -1516,7 +1588,7 @@ public class JavaCppAdapter implements DualApi {
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
         }
         try (PointerPointer<BytePointer> data = new PointerPointer<>(input.length)) {
             List<BytePointer> bpRefs = new ArrayList<>(input.length);
@@ -1968,15 +2040,6 @@ public class JavaCppAdapter implements DualApi {
             Pointer.free(infoPtr);
             return result;
         }
-    }
-
-    private static DualExpression findExpressionById(List<DualExpression> expressions, int id) {
-        for (DualExpression expr : expressions) {
-            if (expr.id() != null && expr.id() == id) {
-                return expr;
-            }
-        }
-        return null;
     }
 
     private static Expression toJavaCppExpression(DualExpression expr) {

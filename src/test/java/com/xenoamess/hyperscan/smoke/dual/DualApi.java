@@ -102,6 +102,8 @@ public interface DualApi {
 
     void scanVector(DualScanner scanner, DualDatabase database, byte[][] input, DualByteMatchHandler handler);
 
+    void scanVector(DualScanner scanner, DualDatabase database, ByteBuffer[] input, DualByteMatchHandler handler);
+
     String getDatabaseInfo(DualDatabase database);
 
     String getSerializedDatabaseInfo(byte[] data);

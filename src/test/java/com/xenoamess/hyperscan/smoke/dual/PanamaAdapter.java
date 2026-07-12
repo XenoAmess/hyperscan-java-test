@@ -685,6 +685,22 @@ public class PanamaAdapter implements DualApi {
     }
 
     @Override
+    public void scanVector(DualScanner scanner, DualDatabase database, ByteBuffer[] input, DualByteMatchHandler handler) {
+        byte[][] data = input == null ? null : new byte[input.length][];
+        if (input != null) {
+            for (int i = 0; i < input.length; i++) {
+                ByteBuffer buffer = input[i];
+                if (buffer != null) {
+                    byte[] bytes = new byte[buffer.remaining()];
+                    buffer.duplicate().get(bytes);
+                    data[i] = bytes;
+                }
+            }
+        }
+        scanVector(scanner, database, data, handler);
+    }
+
+    @Override
     public String getDatabaseInfo(DualDatabase database) {
         return databaseInfo(nativeDatabase(database));
     }
