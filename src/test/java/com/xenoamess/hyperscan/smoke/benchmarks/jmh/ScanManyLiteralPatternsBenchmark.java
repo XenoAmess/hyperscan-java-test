@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit;
 @Warmup(iterations = 5, time = 1)
 @Measurement(iterations = 5, time = 1)
 @State(Scope.Thread)
-public class CrossPlatformFixedWorkloadBenchmark {
+public class ScanManyLiteralPatternsBenchmark {
 
     @State(Scope.Thread)
     public static class BenchmarkState {
@@ -46,11 +46,11 @@ public class CrossPlatformFixedWorkloadBenchmark {
         public void setUp() {
             String impl = System.getProperty("hyperscan.benchmark.implementation", "JAVACPP");
             api = DualImplementation.valueOf(impl).createAdapter();
-            expressions = BenchmarkData.buildCrossPlatformExpressions(api, 500);
-            input = BenchmarkData.buildCrossPlatformInput(20_000, 50);
+            expressions = BenchmarkData.generateLiteralExpressions(api, 500);
             database = api.compileDatabase(expressions);
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
+            input = BenchmarkData.buildHaystackWithMatches(expressions);
             matches = api.scan(scanner, database, input).size();
         }
 
@@ -75,7 +75,7 @@ public class CrossPlatformFixedWorkloadBenchmark {
         BenchmarkState state = new BenchmarkState();
         state.setUp();
         BenchmarkResult result = BenchmarkResultConverter.averageTimeThroughput(
-                "ISA granularity benchmark", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
+                "scanManyLiteralPatterns", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
         state.tearDown();
         return result;
     }

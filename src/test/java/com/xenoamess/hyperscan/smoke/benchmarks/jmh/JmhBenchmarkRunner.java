@@ -7,22 +7,19 @@ import com.xenoamess.hyperscan.smoke.dual.DualApi;
 import com.xenoamess.hyperscan.smoke.dual.DualImplementation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.openjdk.jmh.annotations.Mode;
-import org.openjdk.jmh.results.Result;
 import org.openjdk.jmh.results.RunResult;
 import org.openjdk.jmh.runner.Runner;
+import org.openjdk.jmh.runner.options.ChainedOptionsBuilder;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.TimeValue;
-import org.openjdk.jmh.util.Statistics;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 @Benchmark
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -46,57 +43,33 @@ public class JmhBenchmarkRunner {
         if (!panamaPlatform.isEmpty()) {
             jvmArgs.add("-Dcom.xenoamess.hyperscan_panama.platform=" + panamaPlatform);
         }
-        if (Boolean.parseBoolean(System.getProperty("hyperscan.benchmarks.large.enabled", "true"))) {
+        boolean largeEnabled = Boolean.parseBoolean(System.getProperty("hyperscan.benchmarks.large.enabled", "true"));
+        if (largeEnabled) {
             jvmArgs.add("-Dhyperscan.benchmarks.large.enabled=true");
         }
 
-        Options options = new OptionsBuilder()
-                .include(CrossPlatformFixedWorkloadBenchmark.class.getSimpleName())
-                .forks(2)
-                .warmupIterations(5)
-                .warmupTime(TimeValue.seconds(1))
-                .measurementIterations(5)
-                .measurementTime(TimeValue.seconds(1))
-                .timeUnit(TimeUnit.MILLISECONDS)
-                .mode(Mode.AverageTime)
-                .jvmArgsAppend(jvmArgs.toArray(new String[0]))
-                .build();
+        ChainedOptionsBuilder builder = new OptionsBuilder()
+                .include("com\\.xenoamess\\.hyperscan\\.smoke\\.benchmarks\\.jmh\\..*")
+                .jvmArgsAppend(jvmArgs.toArray(new String[0]));
+        if (!largeEnabled) {
+            builder.exclude("com\\.xenoamess\\.hyperscan\\.smoke\\.benchmarks\\.jmh\\.large\\..*");
+        }
+        Options options = builder.build();
 
         Collection<RunResult> runResults = new Runner(options).run();
 
-        CrossPlatformFixedWorkloadBenchmark.BenchmarkState state = new CrossPlatformFixedWorkloadBenchmark.BenchmarkState();
-        state.setUp();
-        int inputBytes = state.input.length();
-        int matches = state.matches;
-        int patterns = state.expressions.size();
-        DualApi api = state.api;
-        state.tearDown();
-
         List<BenchmarkResult> benchmarkResults = new ArrayList<>();
         for (RunResult runResult : runResults) {
-            Result primary = runResult.getPrimaryResult();
-            Statistics stats = primary.getStatistics();
-            double elapsedMsAvg = stats.getMean();
-            double elapsedMsMin = stats.getMin();
-            double elapsedMsMax = stats.getMax();
-            double throughputAvg = inputBytes * 1000.0 / elapsedMsAvg / 1024.0 / 1024.0;
-            double throughputMin = inputBytes * 1000.0 / elapsedMsMax / 1024.0 / 1024.0;
-            double throughputMax = inputBytes * 1000.0 / elapsedMsMin / 1024.0 / 1024.0;
-
-            benchmarkResults.add(new BenchmarkResult("ISA granularity benchmark")
-                    .metric("patterns", patterns)
-                    .metric("inputBytes", inputBytes)
-                    .metric("matches", matches)
-                    .metric("iterations", stats.getN())
-                    .metric("elapsedMsAvg", elapsedMsAvg)
-                    .metric("elapsedMsMin", elapsedMsMin)
-                    .metric("elapsedMsMax", elapsedMsMax)
-                    .metric("throughputMBpsAvg", throughputAvg)
-                    .metric("throughputMBpsMin", throughputMin)
-                    .metric("throughputMBpsMax", throughputMax));
+            String benchmark = runResult.getParams().getBenchmark();
+            String className = benchmark.substring(0, benchmark.lastIndexOf('.'));
+            Class<?> benchmarkClass = Class.forName(className);
+            Method converter = benchmarkClass.getMethod("toBenchmarkResult", RunResult.class);
+            BenchmarkResult result = (BenchmarkResult) converter.invoke(null, runResult);
+            benchmarkResults.add(result);
         }
 
         DualImplementation impl = DualImplementation.valueOf(IMPLEMENTATION);
+        DualApi api = impl.createAdapter();
         BenchmarkRecorder recorder = new BenchmarkRecorder(
                 BENCHMARK_PLATFORM,
                 api.getVersion(),

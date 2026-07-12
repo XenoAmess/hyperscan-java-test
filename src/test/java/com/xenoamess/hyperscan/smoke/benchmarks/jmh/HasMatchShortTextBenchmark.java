@@ -4,8 +4,8 @@ import com.xenoamess.hyperscan.smoke.BenchmarkResult;
 import com.xenoamess.hyperscan.smoke.dual.DualApi;
 import com.xenoamess.hyperscan.smoke.dual.DualDatabase;
 import com.xenoamess.hyperscan.smoke.dual.DualExpression;
+import com.xenoamess.hyperscan.smoke.dual.DualExpressionFlag;
 import com.xenoamess.hyperscan.smoke.dual.DualImplementation;
-import com.xenoamess.hyperscan.smoke.dual.DualMatch;
 import com.xenoamess.hyperscan.smoke.dual.DualScanner;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -25,13 +25,12 @@ import org.openjdk.jmh.results.RunResult;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-@BenchmarkMode(Mode.AverageTime)
+@BenchmarkMode(Mode.SingleShotTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Fork(2)
-@Warmup(iterations = 5, time = 1)
-@Measurement(iterations = 5, time = 1)
-@State(Scope.Thread)
-public class CrossPlatformFixedWorkloadBenchmark {
+@Warmup(iterations = 5)
+@Measurement(iterations = 10000)
+public class HasMatchShortTextBenchmark {
 
     @State(Scope.Thread)
     public static class BenchmarkState {
@@ -39,19 +38,19 @@ public class CrossPlatformFixedWorkloadBenchmark {
         public DualDatabase database;
         public DualScanner scanner;
         public String input;
-        public List<DualExpression> expressions;
-        public int matches;
+        public DualExpression expression;
+        public boolean matched;
 
         @Setup(Level.Trial)
         public void setUp() {
             String impl = System.getProperty("hyperscan.benchmark.implementation", "JAVACPP");
             api = DualImplementation.valueOf(impl).createAdapter();
-            expressions = BenchmarkData.buildCrossPlatformExpressions(api, 500);
-            input = BenchmarkData.buildCrossPlatformInput(20_000, 50);
-            database = api.compileDatabase(expressions);
+            expression = api.createExpression("password", DualExpressionFlag.CASELESS, 1);
+            database = api.compileDatabase(expression);
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
-            matches = api.scan(scanner, database, input).size();
+            input = "The password is secret.";
+            matched = api.hasMatch(scanner, database, input);
         }
 
         @TearDown(Level.Trial)
@@ -66,16 +65,17 @@ public class CrossPlatformFixedWorkloadBenchmark {
     }
 
     @Benchmark
-    public void scan(BenchmarkState state, Blackhole blackhole) {
-        List<DualMatch> matches = state.api.scan(state.scanner, state.database, state.input);
-        blackhole.consume(matches);
+    public void hasMatch(BenchmarkState state, Blackhole blackhole) {
+        boolean matched = state.api.hasMatch(state.scanner, state.database, state.input);
+        blackhole.consume(matched);
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
         BenchmarkState state = new BenchmarkState();
         state.setUp();
-        BenchmarkResult result = BenchmarkResultConverter.averageTimeThroughput(
-                "ISA granularity benchmark", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
+        long matchesPerInvocation = state.matched ? 1 : 0;
+        BenchmarkResult result = BenchmarkResultConverter.singleShotOps(
+                "hasMatchShortText", runResult.getPrimaryResult(), matchesPerInvocation * 10000);
         state.tearDown();
         return result;
     }

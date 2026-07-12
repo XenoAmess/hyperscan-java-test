@@ -2,10 +2,11 @@ package com.xenoamess.hyperscan.smoke.benchmarks.jmh;
 
 import com.xenoamess.hyperscan.smoke.BenchmarkResult;
 import com.xenoamess.hyperscan.smoke.dual.DualApi;
+import com.xenoamess.hyperscan.smoke.dual.DualByteMatchHandler;
 import com.xenoamess.hyperscan.smoke.dual.DualDatabase;
 import com.xenoamess.hyperscan.smoke.dual.DualExpression;
+import com.xenoamess.hyperscan.smoke.dual.DualExpressionFlag;
 import com.xenoamess.hyperscan.smoke.dual.DualImplementation;
-import com.xenoamess.hyperscan.smoke.dual.DualMatch;
 import com.xenoamess.hyperscan.smoke.dual.DualScanner;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -19,39 +20,50 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.results.RunResult;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-@BenchmarkMode(Mode.AverageTime)
+@BenchmarkMode(Mode.SingleShotTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Fork(2)
-@Warmup(iterations = 5, time = 1)
-@Measurement(iterations = 5, time = 1)
-@State(Scope.Thread)
-public class CrossPlatformFixedWorkloadBenchmark {
+@Warmup(iterations = 5)
+@Measurement(iterations = 10000)
+public class ScanByteBufferBenchmark {
 
     @State(Scope.Thread)
     public static class BenchmarkState {
         public DualApi api;
         public DualDatabase database;
         public DualScanner scanner;
-        public String input;
+        public byte[] input;
         public List<DualExpression> expressions;
-        public int matches;
+        public long[] matchCounter;
+        public DualByteMatchHandler handler;
+        public long matches;
 
         @Setup(Level.Trial)
         public void setUp() {
             String impl = System.getProperty("hyperscan.benchmark.implementation", "JAVACPP");
             api = DualImplementation.valueOf(impl).createAdapter();
-            expressions = BenchmarkData.buildCrossPlatformExpressions(api, 500);
-            input = BenchmarkData.buildCrossPlatformInput(20_000, 50);
+            expressions = List.of(
+                    api.createExpression("[0-9]{4,16}", DualExpressionFlag.SOM_LEFTMOST, 1),
+                    api.createExpression("[A-Fa-f0-9]{32}", DualExpressionFlag.SOM_LEFTMOST, 2)
+            );
             database = api.compileDatabase(expressions);
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
-            matches = api.scan(scanner, database, input).size();
+            input = BenchmarkData.generateLongText(100_000).getBytes(StandardCharsets.UTF_8);
+            matchCounter = new long[1];
+            handler = (expression, fromByteIdx, toByteIdx) -> {
+                matchCounter[0]++;
+                return true;
+            };
+            api.scan(scanner, database, input, handler);
+            matches = matchCounter[0];
+            matchCounter[0] = 0;
         }
 
         @TearDown(Level.Trial)
@@ -66,16 +78,16 @@ public class CrossPlatformFixedWorkloadBenchmark {
     }
 
     @Benchmark
-    public void scan(BenchmarkState state, Blackhole blackhole) {
-        List<DualMatch> matches = state.api.scan(state.scanner, state.database, state.input);
-        blackhole.consume(matches);
+    public void scan(BenchmarkState state) {
+        state.matchCounter[0] = 0;
+        state.api.scan(state.scanner, state.database, state.input, state.handler);
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
         BenchmarkState state = new BenchmarkState();
         state.setUp();
-        BenchmarkResult result = BenchmarkResultConverter.averageTimeThroughput(
-                "ISA granularity benchmark", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
+        BenchmarkResult result = BenchmarkResultConverter.singleShotOps(
+                "scanByteBuffer", runResult.getPrimaryResult(), state.matches * 10000);
         state.tearDown();
         return result;
     }

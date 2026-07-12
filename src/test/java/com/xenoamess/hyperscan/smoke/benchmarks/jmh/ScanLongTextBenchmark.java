@@ -4,6 +4,7 @@ import com.xenoamess.hyperscan.smoke.BenchmarkResult;
 import com.xenoamess.hyperscan.smoke.dual.DualApi;
 import com.xenoamess.hyperscan.smoke.dual.DualDatabase;
 import com.xenoamess.hyperscan.smoke.dual.DualExpression;
+import com.xenoamess.hyperscan.smoke.dual.DualExpressionFlag;
 import com.xenoamess.hyperscan.smoke.dual.DualImplementation;
 import com.xenoamess.hyperscan.smoke.dual.DualMatch;
 import com.xenoamess.hyperscan.smoke.dual.DualScanner;
@@ -31,7 +32,7 @@ import java.util.concurrent.TimeUnit;
 @Warmup(iterations = 5, time = 1)
 @Measurement(iterations = 5, time = 1)
 @State(Scope.Thread)
-public class CrossPlatformFixedWorkloadBenchmark {
+public class ScanLongTextBenchmark {
 
     @State(Scope.Thread)
     public static class BenchmarkState {
@@ -46,11 +47,16 @@ public class CrossPlatformFixedWorkloadBenchmark {
         public void setUp() {
             String impl = System.getProperty("hyperscan.benchmark.implementation", "JAVACPP");
             api = DualImplementation.valueOf(impl).createAdapter();
-            expressions = BenchmarkData.buildCrossPlatformExpressions(api, 500);
-            input = BenchmarkData.buildCrossPlatformInput(20_000, 50);
+            expressions = List.of(
+                    api.createExpression("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", DualExpressionFlag.SOM_LEFTMOST, 1),
+                    api.createExpression("[0-9]{3}-[0-9]{2}-[0-9]{4}", DualExpressionFlag.SOM_LEFTMOST, 2),
+                    api.createExpression("\\bERROR\\b", DualExpressionFlag.SOM_LEFTMOST, 3),
+                    api.createExpression("https?://[^\\s]+", DualExpressionFlag.SOM_LEFTMOST, 4)
+            );
             database = api.compileDatabase(expressions);
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
+            input = BenchmarkData.generateLongText(1_000_000);
             matches = api.scan(scanner, database, input).size();
         }
 
@@ -75,7 +81,7 @@ public class CrossPlatformFixedWorkloadBenchmark {
         BenchmarkState state = new BenchmarkState();
         state.setUp();
         BenchmarkResult result = BenchmarkResultConverter.averageTimeThroughput(
-                "ISA granularity benchmark", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
+                "scanLongText", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
         state.tearDown();
         return result;
     }
