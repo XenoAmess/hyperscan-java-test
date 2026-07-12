@@ -48,13 +48,27 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import sun.misc.Unsafe;
 
 public class JavaCppAdapter implements DualApi {
+
+    private static final Unsafe UNSAFE = getUnsafe();
 
     static {
         HyperscanNativeLoader.load();
     }
 
+    private static Unsafe getUnsafe() {
+        try {
+            Field field = Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (Unsafe) field.get(null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static final ThreadLocal<ByteBuffer> SCAN_BUFFER = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(0));
     private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = new ThreadLocal<>();
 
     private static final match_event_handler MATCH_HANDLER = new match_event_handler() {
@@ -437,14 +451,29 @@ public class JavaCppAdapter implements DualApi {
 
     @Override
     public void scan(DualScanner scanner, DualDatabase database, byte[] input, DualByteMatchHandler handler) {
-        JavaCppScanner s = (JavaCppScanner) scanner;
-        JavaCppWrapperDatabase db = (JavaCppWrapperDatabase) database;
-        s.scanner.scan(db.database, input, new ByteMatchEventHandler() {
-            @Override
-            public boolean onMatch(Expression expression, long from, long to) {
-                return handler.onMatch(toDualExpression(expression), from, to);
+        if (database == null) {
+            throw new IllegalArgumentException("Database is null");
+        }
+        hs_database_t db = nativeDatabase(database);
+        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+        if (scratch == null) {
+            throw new IllegalStateException("Scratch space has already been deallocated");
+        }
+        List<DualExpression> expressions = expressionsOf(database);
+        if (handler != null) {
+            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+        }
+        try (BytePointer data = newBytePointer(input)) {
+            int length = input == null ? 4 : input.length;
+            int result = hyperscan.hs_scan(db, data, length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
+            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                checkResult(result);
             }
-        });
+        } finally {
+            if (handler != null) {
+                STREAM_CALLBACK.remove();
+            }
+        }
     }
 
     @Override
@@ -454,6 +483,9 @@ public class JavaCppAdapter implements DualApi {
         }
         hs_database_t db = nativeDatabase(database);
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+        if (scratch == null) {
+            throw new IllegalStateException("Scratch space has already been deallocated");
+        }
         List<DualExpression> expressions = expressionsOf(database);
         if (handler != null) {
             STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
@@ -512,10 +544,9 @@ public class JavaCppAdapter implements DualApi {
         if (handler != null) {
             STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
         }
-        try (BytePointer data = new BytePointer(input.length)) {
-            data.put(input);
-            data.position(0);
-            int result = hyperscan.hs_scan_stream(s.stream, data, input.length, 0, s.scratch, MATCH_HANDLER, null);
+        try (BytePointer data = newBytePointer(input)) {
+            int length = input == null ? 4 : input.length;
+            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? null : MATCH_HANDLER, null);
             if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
                 checkResult(result);
             }
@@ -2004,6 +2035,32 @@ public class JavaCppAdapter implements DualApi {
         BytePointer data = new BytePointer(input);
         data.position(input.position());
         return data;
+    }
+
+    private static BytePointer newBytePointer(byte[] input) {
+        if (input == null) {
+            return new BytePointer();
+        }
+        ByteBuffer buffer = getScanBuffer(input);
+        BytePointer data = new BytePointer(buffer);
+        data.position(buffer.position());
+        return data;
+    }
+
+    private static ByteBuffer getScanBuffer(byte[] input) {
+        if (input == null) {
+            return null;
+        }
+        ByteBuffer buffer = SCAN_BUFFER.get();
+        if (buffer == null || buffer.capacity() < input.length) {
+            buffer = ByteBuffer.allocateDirect(input.length);
+            SCAN_BUFFER.set(buffer);
+        }
+        buffer.clear();
+        MemorySegment segment = MemorySegment.ofBuffer(buffer);
+        UNSAFE.copyMemory(input, Unsafe.ARRAY_BYTE_BASE_OFFSET, null, segment.address(), input.length);
+        buffer.limit(input.length);
+        return buffer;
     }
 
     private static DualExpressionFlag fromJavaCppFlag(ExpressionFlag flag) {
