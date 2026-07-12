@@ -362,6 +362,12 @@ class BenchmarkSuiteTest {
                                 matches[0]++;
                                 return true;
                             };
+                            int warmupChunks = 100;
+                            api.scanStream(null, stream, preBlock, handler);
+                            for (int i = 0; i < warmupChunks; i++) {
+                                api.scanStream(null, stream, chunk, handler);
+                            }
+                            matches[0] = 0;
                             long start = System.nanoTime();
                             api.scanStream(null, stream, preBlock, handler);
                             long remaining = gb * 1024;
@@ -411,12 +417,17 @@ class BenchmarkSuiteTest {
                 try (DualDatabase database = api.compileDatabase(expressions);
                      DualScanner scanner = api.createScanner()) {
                     api.allocScratch(scanner, database);
-                    int iterations = 10;
+                    int iterations = 1000;
+                    int warmupIterations = 100;
                     long[] matches = new long[1];
                     DualByteMatchHandler handler = (expr, from, to) -> {
                         matches[0]++;
                         return true;
                     };
+                    for (int i = 0; i < warmupIterations; i++) {
+                        api.scan(scanner, database, block, handler);
+                    }
+                    matches[0] = 0;
                     long start = System.nanoTime();
                     for (int i = 0; i < iterations; i++) {
                         api.scan(scanner, database, block, handler);
