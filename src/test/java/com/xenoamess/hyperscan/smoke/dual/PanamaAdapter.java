@@ -490,10 +490,10 @@ public class PanamaAdapter implements DualApi {
         }
         MemorySegment buffer = STREAM_BUFFER.get();
         if (buffer == MemorySegment.NULL || buffer.byteSize() < input.length) {
-            buffer = STREAM_BUFFER_ARENA.allocate(input.length);
+            buffer = STREAM_BUFFER_ARENA.allocate(input.length, 64);
             STREAM_BUFFER.set(buffer);
         }
-        MemorySegment.copy(MemorySegment.ofArray(input), 0, buffer, 0, input.length);
+        UNSAFE.copyMemory(input, Unsafe.ARRAY_BYTE_BASE_OFFSET, null, buffer.address(), input.length);
         return buffer;
     }
 
