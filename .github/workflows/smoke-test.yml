@@ -151,6 +151,7 @@ jobs:
           mvn -B test \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
             -Djavacpp.platform=${{ matrix.platform }} \
+            -Dhyperscan.benchmarks.enabled=false \
             -Dhyperscan.benchmarks.large.enabled=true \
             -Dbenchmark.platform=${{ matrix.platform }}
 
@@ -166,19 +167,167 @@ jobs:
           name: surefire-reports-${{ matrix.platform }}
           path: target/surefire-reports/
 
+  benchmark:
+    name: Benchmark ${{ matrix.impl }} on ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        impl: [JAVACPP, PANAMA]
+        platform: [linux-x86_64-baseline, linux-x86_64-avx2, linux-x86_64, linux-arm64-baseline, linux-arm64, windows-x86_64-baseline, windows-x86_64]
+        include:
+          - platform: linux-x86_64-baseline
+            os: linux
+            runner: ubuntu-24.04
+          - platform: linux-x86_64-avx2
+            os: linux
+            runner: ubuntu-24.04
+          - platform: linux-x86_64
+            os: linux
+            runner: ubuntu-24.04
+          - platform: linux-arm64-baseline
+            os: linux
+            runner: ubuntu-24.04-arm
+          - platform: linux-arm64
+            os: linux
+            runner: ubuntu-24.04-arm
+          - platform: windows-x86_64-baseline
+            os: windows
+            runner: windows-latest
+          - platform: windows-x86_64
+            os: windows
+            runner: windows-latest
+
+    env:
+      NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}
+      DETECTED_PLATFORM: ${{ matrix.platform }}
+      GITHUB_SHA: ${{ github.sha }}
+      RUNNER_OS: ${{ matrix.os }}
+      CPU_MODEL: unknown
+      CPU_FLAGS: unknown
+
+    steps:
+      - name: Set runner architecture
+        run: echo "RUNNER_ARCH=${{ runner.arch }}" >> "$GITHUB_ENV"
+
+      - name: Checkout test project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          lfs: true
+
+      - name: Set up JDK
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Resolve effective native version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}"
+          echo "nativeVersion=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Collect CPU information (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          MODEL=$(grep -m1 'model name' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+          if [ -z "$MODEL" ]; then
+            IMPL=$(grep -m1 'CPU implementer' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            PART=$(grep -m1 'CPU part' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            VARIANT=$(grep -m1 'CPU variant' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            ARCH=$(grep -m1 'CPU architecture' /proc/cpuinfo | sed 's/^.*: //' || echo '')
+            if [ -n "$IMPL" ] && [ -n "$PART" ]; then
+              MODEL="ARM implementer=${IMPL} part=${PART} variant=${VARIANT} arch=${ARCH}"
+            fi
+          fi
+          if [ -z "$MODEL" ]; then
+            MODEL='unknown'
+          fi
+          FLAGS=$(grep -m1 '^flags' /proc/cpuinfo | sed 's/^.*: //' || grep -m1 '^Features' /proc/cpuinfo | sed 's/^.*: //' || echo 'unknown')
+          echo "CPU_MODEL=$MODEL" >> "$GITHUB_ENV"
+          echo "CPU_FLAGS=$FLAGS" >> "$GITHUB_ENV"
+          echo "CPU model: $MODEL"
+          echo "CPU flags: $FLAGS"
+
+      - name: Collect CPU information (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $model = (Get-CimInstance Win32_Processor).Name.Trim()
+          if (-not $model) { $model = 'unknown' }
+          "CPU_MODEL=$model" >> $env:GITHUB_ENV
+          "CPU_FLAGS=unknown" >> $env:GITHUB_ENV
+          Write-Host "CPU model: $model"
+
+      - name: Check CPU support for ${{ matrix.platform }}
+        if: matrix.os == 'linux'
+        id: cpu-check
+        run: |
+          PLATFORM="${{ matrix.platform }}"
+          case "$PLATFORM" in
+            linux-x86_64)
+              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx512f'; then
+                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::CPU does not support AVX-512; skipping $PLATFORM benchmark."
+              fi
+              ;;
+            linux-x86_64-avx2)
+              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx2'; then
+                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::CPU does not support AVX2; skipping $PLATFORM benchmark."
+              fi
+              ;;
+            linux-arm64)
+              if ! grep -m1 '^Features' /proc/cpuinfo | grep -qw 'sve2'; then
+                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::CPU does not support SVE2; skipping $PLATFORM benchmark."
+              fi
+              ;;
+          esac
+
+      - name: Run JMH benchmarks for ${{ matrix.impl }} on ${{ matrix.platform }}
+        if: steps.cpu-check.outputs.SKIPPED != 'true'
+        run: |
+          set -euo pipefail
+          mvn -B test \
+            -Dtest=JmhBenchmarkRunner \
+            -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
+            -Djavacpp.platform=${{ matrix.platform }} \
+            -Dhyperscan.benchmarks.enabled=true \
+            -Dhyperscan.benchmark.implementation=${{ matrix.impl }} \
+            -Dhyperscan.benchmarks.large.enabled=true \
+            -Dbenchmark.platform=${{ matrix.platform }}
+
+      - name: Skip JMH benchmarks for ${{ matrix.platform }}
+        if: steps.cpu-check.outputs.SKIPPED == 'true'
+        run: |
+          echo "Benchmarks for ${{ matrix.platform }} skipped due to missing CPU features."
+
       - name: Upload benchmark raw result
         if: always() && steps.cpu-check.outputs.SKIPPED != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: benchmark-raw-${{ matrix.platform }}
+          name: benchmark-raw-${{ matrix.impl }}-${{ matrix.platform }}
           path: target/benchmark-results/
           if-no-files-found: warn
 
   report:
     name: Aggregate performance report
-    needs: smoke
+    needs: [smoke, benchmark]
     runs-on: ubuntu-24.04
-    if: always() && !cancelled() && needs.smoke.result == 'success'
+    if: always() && !cancelled() && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')) && needs.smoke.result == 'success' && needs.benchmark.result == 'success'
     steps:
       - name: Checkout test project
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
