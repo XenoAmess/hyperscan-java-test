@@ -1407,11 +1407,13 @@ public class JavaCppAdapter implements DualApi {
             }
             try (PointerPointer<BytePointer> data = new PointerPointer<>(input.length);
                  IntPointer lengthPtr = new IntPointer(lengths)) {
+                List<BytePointer> bpRefs = new ArrayList<>(input.length);
                 for (int i = 0; i < input.length; i++) {
                     if (input[i] == null) {
                         data.put(i, new BytePointer());
                     } else {
                         BytePointer bp = new BytePointer(input[i].length);
+                        bpRefs.add(bp);
                         bp.put(input[i]);
                         data.put(i, bp);
                     }
@@ -1437,11 +1439,13 @@ public class JavaCppAdapter implements DualApi {
             STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
         }
         try (PointerPointer<BytePointer> data = new PointerPointer<>(input.length)) {
+            List<BytePointer> bpRefs = new ArrayList<>(input.length);
             for (int i = 0; i < input.length; i++) {
                 if (input[i] == null) {
                     data.put(i, new BytePointer());
                 } else {
                     BytePointer bp = new BytePointer(input[i].length);
+                    bpRefs.add(bp);
                     bp.put(input[i]);
                     data.put(i, bp);
                 }
