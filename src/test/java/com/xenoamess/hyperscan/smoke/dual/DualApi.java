@@ -1,5 +1,6 @@
 package com.xenoamess.hyperscan.smoke.dual;
 
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -85,6 +86,8 @@ public interface DualApi {
 
     void scan(DualScanner scanner, DualDatabase database, byte[] input, DualByteMatchHandler handler);
 
+    void scan(DualScanner scanner, DualDatabase database, ByteBuffer input, DualByteMatchHandler handler);
+
     boolean hasMatch(DualScanner scanner, DualDatabase database, String input);
 
     boolean hasMatch(DualScanner scanner, DualDatabase database, byte[] input);
@@ -92,6 +95,8 @@ public interface DualApi {
     DualStream openStream(DualDatabase database);
 
     void scanStream(DualScanner scanner, DualStream stream, byte[] input, DualByteMatchHandler handler);
+
+    void scanStream(DualScanner scanner, DualStream stream, ByteBuffer input, DualByteMatchHandler handler);
 
     void closeStream(DualScanner scanner, DualStream stream, DualByteMatchHandler handler);
 

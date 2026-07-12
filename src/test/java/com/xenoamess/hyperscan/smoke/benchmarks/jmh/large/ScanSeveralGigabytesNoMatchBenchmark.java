@@ -24,7 +24,7 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.results.RunResult;
 
-import java.util.Arrays;
+import java.nio.ByteBuffer;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -41,7 +41,7 @@ public class ScanSeveralGigabytesNoMatchBenchmark {
         public DualApi api;
         public DualDatabase database;
         public DualStream stream;
-        public byte[] chunk;
+        public ByteBuffer chunk;
         public long chunks;
         public boolean closed;
 
@@ -54,8 +54,10 @@ public class ScanSeveralGigabytesNoMatchBenchmark {
             );
             database = api.compileDatabase(expressions, DualMode.STREAM);
             stream = api.openStream(database);
-            chunk = new byte[1024 * 1024];
-            Arrays.fill(chunk, (byte) 'X');
+            chunk = ByteBuffer.allocateDirect(1024 * 1024);
+            for (int i = 0; i < chunk.capacity(); i++) {
+                chunk.put(i, (byte) 'X');
+            }
             chunks = 5L * 1024;
             closed = false;
         }

@@ -26,8 +26,8 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.results.RunResult;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -51,7 +51,7 @@ public class ScanGigabytesStreamingMatchBenchmark {
         public DualStream stream;
         public byte[] preBlock;
         public byte[] postBlock;
-        public byte[] chunk;
+        public ByteBuffer chunk;
         public boolean closed;
 
         @Setup(Level.Iteration)
@@ -66,8 +66,10 @@ public class ScanGigabytesStreamingMatchBenchmark {
             stream = api.openStream(database);
             preBlock = params.preBlock().getBytes(StandardCharsets.UTF_8);
             postBlock = params.postBlock().getBytes(StandardCharsets.UTF_8);
-            chunk = new byte[1024 * 1024];
-            Arrays.fill(chunk, (byte) 'X');
+            chunk = ByteBuffer.allocateDirect(1024 * 1024);
+            for (int i = 0; i < chunk.capacity(); i++) {
+                chunk.put(i, (byte) 'X');
+            }
             closed = false;
         }
 

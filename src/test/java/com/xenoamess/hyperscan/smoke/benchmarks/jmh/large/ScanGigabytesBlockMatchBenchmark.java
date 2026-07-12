@@ -25,6 +25,7 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.results.RunResult;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
@@ -45,7 +46,7 @@ public class ScanGigabytesBlockMatchBenchmark {
         public DualApi api;
         public DualDatabase database;
         public DualScanner scanner;
-        public byte[] block;
+        public ByteBuffer block;
         public long matches;
 
         @Setup(Level.Trial)
@@ -61,10 +62,16 @@ public class ScanGigabytesBlockMatchBenchmark {
             api.allocScratch(scanner, database);
             byte[] preBlock = params.preBlock().getBytes(StandardCharsets.UTF_8);
             byte[] postBlock = params.postBlock().getBytes(StandardCharsets.UTF_8);
-            block = new byte[1024 * 1024];
-            Arrays.fill(block, (byte) 'X');
-            System.arraycopy(preBlock, 0, block, 0, preBlock.length);
-            System.arraycopy(postBlock, 0, block, block.length - postBlock.length, postBlock.length);
+            block = ByteBuffer.allocateDirect(1024 * 1024);
+            for (int i = 0; i < block.capacity(); i++) {
+                block.put(i, (byte) 'X');
+            }
+            for (int i = 0; i < preBlock.length; i++) {
+                block.put(i, preBlock[i]);
+            }
+            for (int i = 0; i < postBlock.length; i++) {
+                block.put(block.capacity() - postBlock.length + i, postBlock[i]);
+            }
             long[] counter = new long[1];
             DualByteMatchHandler handler = (expr, from, to) -> {
                 counter[0]++;
@@ -105,7 +112,7 @@ public class ScanGigabytesBlockMatchBenchmark {
         BehaviourTest.HugeScanCase params = BehaviourTest.GIGABYTE_CASES.get(state.caseIndex);
         String name = "scanGigabytesBlockMatch_" + BenchmarkData.sanitizePattern(params.pattern());
         BenchmarkResult result = BenchmarkResultConverter.singleShotLarge(
-                name, runResult.getPrimaryResult(), state.block.length, state.matches, 1000);
+                name, runResult.getPrimaryResult(), state.block.capacity(), state.matches, 1000);
         state.tearDown();
         return result;
     }

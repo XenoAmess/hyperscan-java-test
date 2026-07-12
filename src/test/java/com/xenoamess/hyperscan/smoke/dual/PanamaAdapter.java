@@ -32,6 +32,8 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -379,14 +381,39 @@ public class PanamaAdapter implements DualApi {
             MemorySegment flags = arena.allocate(n * ValueLayout.JAVA_INT.byteSize());
             MemorySegment ids = arena.allocate(n * ValueLayout.JAVA_INT.byteSize());
             MemorySegment extPtr = arena.allocate(n * ValueLayout.ADDRESS.byteSize());
+
+            // Bulk allocate all pattern strings into a single native block.
+            byte[][] encoded = new byte[n][];
+            long totalPatternBytes = 0;
+            for (int i = 0; i < n; i++) {
+                byte[] bytes = expressions.get(i).pattern().getBytes(StandardCharsets.UTF_8);
+                encoded[i] = bytes;
+                totalPatternBytes += (long) bytes.length + 1L;
+            }
+            MemorySegment strings = arena.allocate(totalPatternBytes);
+            long offset = 0;
             for (int i = 0; i < n; i++) {
                 DualExpression expr = expressions.get(i);
-                expressionsPtr.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(expr.pattern()));
+                byte[] bytes = encoded[i];
+                long len = bytes.length;
+                MemorySegment ptr = strings.asSlice(offset, len + 1L);
+                ptr.copyFrom(MemorySegment.ofArray(bytes).asSlice(0, len));
+                ptr.set(ValueLayout.JAVA_BYTE, len, (byte) 0);
+                expressionsPtr.setAtIndex(ValueLayout.ADDRESS, i, ptr);
                 flags.setAtIndex(ValueLayout.JAVA_INT, i, toFlagBits(expr.flags()));
                 ids.setAtIndex(ValueLayout.JAVA_INT, i, expr.id() != null ? expr.id() : 0);
-                MemorySegment ext = newDefaultExprExt(arena);
+                offset += len + 1L;
+            }
+
+            // Bulk allocate expr_ext structs.
+            long extSize = hs_expr_ext.layout().byteSize();
+            MemorySegment extBlock = arena.allocate(n * extSize);
+            for (int i = 0; i < n; i++) {
+                MemorySegment ext = extBlock.asSlice(i * extSize, extSize);
+                initDefaultExprExt(ext);
                 extPtr.setAtIndex(ValueLayout.ADDRESS, i, ext);
             }
+
             MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
             MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
             int result = hyperscan.hs_compile_ext_multi(expressionsPtr, flags, ids, extPtr, n, mode, MemorySegment.NULL, dbOut, errOut);
@@ -481,6 +508,18 @@ public class PanamaAdapter implements DualApi {
     }
 
     @Override
+    public void scan(DualScanner scanner, DualDatabase database, ByteBuffer input, DualByteMatchHandler handler) {
+        PanamaScanner s = (PanamaScanner) scanner;
+        PanamaDatabase db = (PanamaDatabase) database;
+        s.scanner().scan(db.database(), input, new ByteMatchEventHandler() {
+            @Override
+            public boolean onMatch(Expression expression, long from, long to) {
+                return handler.onMatch(toDualExpression(expression), from, to);
+            }
+        });
+    }
+
+    @Override
     public boolean hasMatch(DualScanner scanner, DualDatabase database, String input) {
         PanamaScanner s = (PanamaScanner) scanner;
         PanamaDatabase db = (PanamaDatabase) database;
@@ -532,6 +571,36 @@ public class PanamaAdapter implements DualApi {
         try {
             MemorySegment data = getStreamBuffer(input);
             int length = input == null ? 4 : input.length;
+            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
+            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
+                checkResult(result);
+            }
+        } finally {
+            if (handler != null) {
+                STREAM_CALLBACK.remove();
+            }
+        }
+    }
+
+    @Override
+    public void scanStream(DualScanner scanner, DualStream stream, ByteBuffer input, DualByteMatchHandler handler) {
+        PanamaStream s = (PanamaStream) stream;
+        if (s.closed) {
+            throw new IllegalStateException("Stream is already closed");
+        }
+        if (handler != null) {
+            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+        }
+        try {
+            MemorySegment data;
+            int length;
+            if (input == null) {
+                data = MemorySegment.NULL;
+                length = 4;
+            } else {
+                data = MemorySegment.ofBuffer(input).asSlice(input.position(), input.remaining());
+                length = input.remaining();
+            }
             int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
             if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
                 checkResult(result);
@@ -1877,13 +1946,17 @@ public class PanamaAdapter implements DualApi {
 
     private static MemorySegment newDefaultExprExt(Arena arena) {
         MemorySegment ext = arena.allocate(hs_expr_ext.layout());
+        initDefaultExprExt(ext);
+        return ext;
+    }
+
+    private static void initDefaultExprExt(MemorySegment ext) {
         hs_expr_ext.flags(ext, 0L);
         hs_expr_ext.min_offset(ext, 0L);
         hs_expr_ext.max_offset(ext, -1L);
         hs_expr_ext.min_length(ext, 0L);
         hs_expr_ext.edit_distance(ext, 0);
         hs_expr_ext.hamming_distance(ext, 0);
-        return ext;
     }
 
     private static void applyExprExt(MemorySegment ext, DualExpressionExt src) {

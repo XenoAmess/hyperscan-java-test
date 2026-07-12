@@ -38,8 +38,11 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -355,7 +358,7 @@ public class JavaCppAdapter implements DualApi {
                 javaCppExpressions.add(toJavaCppExpression(expr));
             }
             try {
-                return new JavaCppWrapperDatabase(com.gliwka.hyperscan.wrapper.Database.compile(javaCppExpressions));
+                return new JavaCppWrapperDatabase(com.gliwka.hyperscan.wrapper.Database.compile(javaCppExpressions), expressions);
             } catch (CompileErrorException e) {
                 throw new RuntimeException(e);
             }
@@ -445,6 +448,30 @@ public class JavaCppAdapter implements DualApi {
     }
 
     @Override
+    public void scan(DualScanner scanner, DualDatabase database, ByteBuffer input, DualByteMatchHandler handler) {
+        if (database == null) {
+            throw new IllegalArgumentException("Database is null");
+        }
+        hs_database_t db = nativeDatabase(database);
+        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+        List<DualExpression> expressions = expressionsOf(database);
+        if (handler != null) {
+            STREAM_CALLBACK.set(new HandlerContext(handler, expressions));
+        }
+        try (BytePointer data = newBytePointer(input)) {
+            int length = input == null ? 4 : input.remaining();
+            int result = hyperscan.hs_scan(db, data, length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
+            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                checkResult(result);
+            }
+        } finally {
+            if (handler != null) {
+                STREAM_CALLBACK.remove();
+            }
+        }
+    }
+
+    @Override
     public boolean hasMatch(DualScanner scanner, DualDatabase database, String input) {
         JavaCppScanner s = (JavaCppScanner) scanner;
         JavaCppWrapperDatabase db = (JavaCppWrapperDatabase) database;
@@ -489,6 +516,28 @@ public class JavaCppAdapter implements DualApi {
             data.put(input);
             data.position(0);
             int result = hyperscan.hs_scan_stream(s.stream, data, input.length, 0, s.scratch, MATCH_HANDLER, null);
+            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                checkResult(result);
+            }
+        } finally {
+            if (handler != null) {
+                STREAM_CALLBACK.remove();
+            }
+        }
+    }
+
+    @Override
+    public void scanStream(DualScanner scanner, DualStream stream, ByteBuffer input, DualByteMatchHandler handler) {
+        JavaCppStream s = (JavaCppStream) stream;
+        if (s.closed) {
+            throw new IllegalStateException("Stream is already closed");
+        }
+        if (handler != null) {
+            STREAM_CALLBACK.set(new HandlerContext(handler, s.expressions));
+        }
+        try (BytePointer data = newBytePointer(input)) {
+            int length = input == null ? 4 : input.remaining();
+            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? null : MATCH_HANDLER, null);
             if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
                 checkResult(result);
             }
@@ -600,7 +649,7 @@ public class JavaCppAdapter implements DualApi {
     @Override
     public DualDatabase deserialize(byte[] data) {
         try {
-            return new JavaCppWrapperDatabase(com.gliwka.hyperscan.wrapper.Database.load(new ByteArrayInputStream(data)));
+            return new JavaCppWrapperDatabase(com.gliwka.hyperscan.wrapper.Database.load(new ByteArrayInputStream(data)), List.of());
         } catch (Exception e) {
             return deserializeNative(data);
         }
@@ -1938,6 +1987,25 @@ public class JavaCppAdapter implements DualApi {
         return new DualExpression(expr.getExpression(), flags, expr.getId());
     }
 
+    private static List<DualExpression> expressionsOf(DualDatabase database) {
+        if (database instanceof JavaCppNativeDatabase nativeDb) {
+            return nativeDb.expressions;
+        }
+        if (database instanceof JavaCppWrapperDatabase wrapper) {
+            return wrapper.expressions;
+        }
+        return List.of();
+    }
+
+    private static BytePointer newBytePointer(ByteBuffer input) {
+        if (input == null) {
+            return new BytePointer();
+        }
+        BytePointer data = new BytePointer(input);
+        data.position(input.position());
+        return data;
+    }
+
     private static DualExpressionFlag fromJavaCppFlag(ExpressionFlag flag) {
         return switch (flag) {
             case CASELESS -> DualExpressionFlag.CASELESS;
@@ -1955,7 +2023,7 @@ public class JavaCppAdapter implements DualApi {
         };
     }
 
-    private record JavaCppWrapperDatabase(com.gliwka.hyperscan.wrapper.Database database) implements DualDatabase {
+    private record JavaCppWrapperDatabase(com.gliwka.hyperscan.wrapper.Database database, List<DualExpression> expressions) implements DualDatabase {
         @Override
         public long getSize() {
             return database.getSize();
