@@ -23,10 +23,10 @@
 
 ## Cross-Repository Bug Fix Strategy
 
-When any bug is found in `hyperscan-java-test`, evaluate whether the same bug also exists in the sibling projects (`hyperscan-java-panama`, `hyperscan-java`, and where relevant `hyperscan-java-native`):
+When any bug is found in `hyperscan-java-test`, evaluate whether the same bug also exists in the sibling projects (`hyperscan-java-panama` and `hyperscan-java-native`):
 
 1. Identify the root cause and whether it is specific to the test adapter / test harness code in `hyperscan-java-test` or belongs to a shared concept (e.g., native memory management, JNI/FFM binding patterns, compile/scan argument handling, loader behavior).
-2. Check the corresponding code paths in `../hyperscan-java-panama` and `../hyperscan-java` for the same or similar anti-pattern.
+2. Check the corresponding code paths in `../hyperscan-java-panama` and `../hyperscan-java-native` for the same or similar anti-pattern.
 3. If the same bug exists in a sibling project, fix it there as well; do not leave the same defect in the upstream wrapper/native code.
 4. If the bug is purely local to the test adapter or test fixture, fix it in `hyperscan-java-test` and document why it does not affect the sibling projects.
 
