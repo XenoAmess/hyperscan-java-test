@@ -67,6 +67,28 @@ public class PanamaAdapter implements DualApi {
     private static final ThreadLocal<MemorySegment> STREAM_BUFFER = ThreadLocal.withInitial(() -> MemorySegment.NULL);
     private static final SymbolLookup HS_LIBRARY_LOOKUP;
 
+    private static final ThreadLocal<DirectBufferCache> DIRECT_BUFFER_CACHE = ThreadLocal.withInitial(DirectBufferCache::new);
+
+    private static final class DirectBufferCache {
+        ByteBuffer buffer;
+        int position = -1;
+        int limit = -1;
+        MemorySegment segment = MemorySegment.NULL;
+    }
+
+    private static MemorySegment directBufferSegment(ByteBuffer input) {
+        DirectBufferCache cache = DIRECT_BUFFER_CACHE.get();
+        if (cache.buffer == input && cache.position == input.position() && cache.limit == input.limit()) {
+            return cache.segment;
+        }
+        MemorySegment segment = MemorySegment.ofBuffer(input).asSlice(input.position(), input.remaining());
+        cache.buffer = input;
+        cache.position = input.position();
+        cache.limit = input.limit();
+        cache.segment = segment;
+        return segment;
+    }
+
     static {
         try {
             HS_LIBRARY_LOOKUP = SymbolLookup.libraryLookup(findHsLibraryPath(), HS_LIBRARY_ARENA);
@@ -257,25 +279,27 @@ public class PanamaAdapter implements DualApi {
 
     private static final HyperscanJni HYPERSCAN_JNI = HyperscanNativeLoader.loadJni();
 
-    private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = new ThreadLocal<>();
+    private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = ThreadLocal.withInitial(HandlerContext::new);
 
     private static final MemorySegment MATCH_HANDLER = HYPERSCAN_JNI.allocateMatchEventHandler(
             (id, from, to, flags) -> {
                 HandlerContext ctx = STREAM_CALLBACK.get();
-                if (ctx == null) {
+                if (ctx == null || ctx.handler == null) {
                     return 0;
                 }
-                DualExpression[] byId = ctx.expressionsById();
+                DualExpression[] byId = ctx.expressionsById;
                 DualExpression expression = id >= 0 && id < byId.length ? byId[id] : null;
                 if (expression == null) {
                     expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
                 }
-                return ctx.handler().onMatch(expression, from, to) ? 0 : -1;
+                return ctx.handler.onMatch(expression, from, to) ? 0 : -1;
             },
             HS_LIBRARY_ARENA
     );
 
-    private record HandlerContext(DualByteMatchHandler handler, DualExpression[] expressionsById) {
+    private static final class HandlerContext {
+        DualByteMatchHandler handler;
+        DualExpression[] expressionsById;
     }
 
     private static DualExpression[] buildExpressionLookup(List<DualExpression> expressions) {
@@ -296,8 +320,16 @@ public class PanamaAdapter implements DualApi {
         return byId;
     }
 
-    private static HandlerContext newHandlerContext(DualByteMatchHandler handler, List<DualExpression> expressions) {
-        return new HandlerContext(handler, buildExpressionLookup(expressions));
+    private static void setHandlerContext(DualByteMatchHandler handler, DualExpression[] expressionsById) {
+        HandlerContext ctx = STREAM_CALLBACK.get();
+        ctx.handler = handler;
+        ctx.expressionsById = expressionsById;
+    }
+
+    private static void clearHandlerContext() {
+        HandlerContext ctx = STREAM_CALLBACK.get();
+        ctx.handler = null;
+        ctx.expressionsById = null;
     }
 
     @Override
@@ -566,7 +598,7 @@ public class PanamaAdapter implements DualApi {
             throw new IllegalStateException("Stream is already closed");
         }
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            setHandlerContext(handler, s.expressionsById);
         }
         try {
             MemorySegment data = getStreamBuffer(input);
@@ -577,7 +609,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -589,7 +621,7 @@ public class PanamaAdapter implements DualApi {
             throw new IllegalStateException("Stream is already closed");
         }
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            setHandlerContext(handler, s.expressionsById);
         }
         try {
             MemorySegment data;
@@ -598,7 +630,7 @@ public class PanamaAdapter implements DualApi {
                 data = MemorySegment.NULL;
                 length = 4;
             } else {
-                data = MemorySegment.ofBuffer(input).asSlice(input.position(), input.remaining());
+                data = directBufferSegment(input);
                 length = input.remaining();
             }
             int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
@@ -607,7 +639,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -620,7 +652,7 @@ public class PanamaAdapter implements DualApi {
         }
         s.closed = true;
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            setHandlerContext(handler, s.expressionsById);
         }
         try {
             int result = hyperscan.hs_close_stream(s.stream, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
@@ -629,7 +661,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
             hyperscan.hs_free_scratch(s.scratch);
         }
@@ -640,7 +672,7 @@ public class PanamaAdapter implements DualApi {
         MemorySegment db = nativeDatabase(database);
         List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            setHandlerContext(handler, buildExpressionLookup(expressions));
         }
         try {
             try (Arena arena = Arena.ofConfined()) {
@@ -679,7 +711,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -1462,7 +1494,7 @@ public class PanamaAdapter implements DualApi {
         PanamaStream s = (PanamaStream) stream;
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            setHandlerContext(handler, s.expressionsById);
         }
         try {
             try (Arena arena = Arena.ofConfined()) {
@@ -1472,7 +1504,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -1489,13 +1521,13 @@ public class PanamaAdapter implements DualApi {
         s.closed = true;
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            setHandlerContext(handler, s.expressionsById);
         }
         try {
             return hyperscan.hs_close_stream(s.stream, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
             hyperscan.hs_free_scratch(s.scratch);
         }
@@ -1509,13 +1541,13 @@ public class PanamaAdapter implements DualApi {
         PanamaStream s = (PanamaStream) stream;
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            setHandlerContext(handler, s.expressionsById);
         }
         try {
             return hyperscan.hs_reset_stream(s.stream, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -1551,13 +1583,13 @@ public class PanamaAdapter implements DualApi {
         PanamaStream fromStream = (PanamaStream) from;
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, toStream.expressions));
+            setHandlerContext(handler, toStream.expressionsById);
         }
         try {
             return hyperscan.hs_reset_and_copy_stream(toStream.stream, fromStream.stream, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -1571,7 +1603,7 @@ public class PanamaAdapter implements DualApi {
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            setHandlerContext(handler, buildExpressionLookup(expressions));
         }
         try {
             try (Arena arena = Arena.ofConfined()) {
@@ -1581,7 +1613,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -1595,7 +1627,7 @@ public class PanamaAdapter implements DualApi {
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            setHandlerContext(handler, buildExpressionLookup(expressions));
         }
         try {
             try (Arena arena = Arena.ofConfined()) {
@@ -1614,7 +1646,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -1628,7 +1660,7 @@ public class PanamaAdapter implements DualApi {
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
         if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            setHandlerContext(handler, buildExpressionLookup(expressions));
         }
         try {
             try (Arena arena = Arena.ofConfined()) {
@@ -1645,7 +1677,7 @@ public class PanamaAdapter implements DualApi {
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                clearHandlerContext();
             }
         }
     }
@@ -2122,12 +2154,14 @@ public class PanamaAdapter implements DualApi {
         final MemorySegment stream;
         final MemorySegment scratch;
         final List<DualExpression> expressions;
+        final DualExpression[] expressionsById;
         boolean closed;
 
         PanamaStream(MemorySegment stream, MemorySegment scratch, List<DualExpression> expressions) {
             this.stream = stream;
             this.scratch = scratch;
             this.expressions = expressions;
+            this.expressionsById = buildExpressionLookup(expressions);
         }
 
         @Override
