@@ -442,6 +442,8 @@ jobs:
     steps:
       - name: Check whether any matrix cell hit a CPU feature miss
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Only auto-retry from push-triggered runs. Manual workflow_dispatch and
@@ -451,16 +453,20 @@ jobs:
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Detect CPU feature misses by scanning this run's logs for the warning
-          # we added to cpu-check.
-          if gh run view "${{ github.run_id }}" --log 2>/dev/null \
-              | grep -q "flagging for retry"; then
-            echo "Detected CPU feature miss in this run."
-          else
+          # Detect CPU feature misses by listing this run's jobs and looking for
+          # any whose Run-tests step was skipped due to a CPU check failure.
+          # 'gh run view --log' filters out ::warning:: annotations, so we cannot
+          # grep logs; the jobs API surfaces step outcomes instead.
+          MISSING=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            --jq '[.jobs[] | .steps[]? | select((.name | test("^Run smoke tests for "))
+                                                or (.name | test("^Run JMH benchmarks for ")))
+                 | select(.conclusion == "skipped")] | length')
+          if [ "${MISSING:-0}" -eq 0 ]; then
             echo "No CPU feature miss detected in this run; not re-dispatching."
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "Detected CPU feature miss on $MISSING matrix cell(s)."
           # Cap concurrent in-flight smoke-test runs to prevent runaway re-dispatch.
           INFLIGHT=$(gh run list --workflow=smoke-test.yml --limit=20 --json status \
             --jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
