@@ -380,6 +380,20 @@ jobs:
           NATIVE_VERSION: ${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}
           GITHUB_SHA: ${{ github.sha }}
 
+      - name: Delete previous performance-report artifacts
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "performance-report") | .id' \
+          | while read -r ARTIFACT_ID; do
+              [ -z "$ARTIFACT_ID" ] && continue
+              echo "Deleting previous performance-report artifact id=$ARTIFACT_ID"
+              gh api -X DELETE "/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID" >/dev/null
+            done
+
       - name: Upload performance report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -391,6 +405,26 @@ jobs:
       - name: Configure GitHub Pages
         if: github.ref == 'refs/heads/master'
         uses: actions/configure-pages@v6
+
+      - name: Delete previous github-pages artifacts
+        if: github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # upload-pages-artifact@v5 requires the artifact to be named exactly
+          # 'github-pages'. When this workflow is re-run (manually via UI or
+          # automatically), previous attempts' artifacts persist and cause
+          # deploy-pages to fail with "Multiple artifacts named 'github-pages'".
+          # Clean up any leftover github-pages artifacts belonging to this run
+          # before uploading a fresh one.
+          gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "github-pages") | .id' \
+          | while read -r ARTIFACT_ID; do
+              [ -z "$ARTIFACT_ID" ] && continue
+              echo "Deleting previous github-pages artifact id=$ARTIFACT_ID"
+              gh api -X DELETE "/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID" >/dev/null
+            done
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/master'
