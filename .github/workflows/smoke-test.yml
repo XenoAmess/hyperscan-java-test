@@ -468,7 +468,9 @@ jobs:
           fi
           echo "Detected CPU feature miss on $MISSING matrix cell(s)."
           # Cap concurrent in-flight smoke-test runs to prevent runaway re-dispatch.
-          INFLIGHT=$(gh run list --workflow=smoke-test.yml --limit=20 --json status \
+          # --repo is required because this job is not in a git checkout context.
+          INFLIGHT=$(gh run list --repo "${{ github.repository }}" \
+            --workflow=smoke-test.yml --limit=20 --json status \
             --jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
           if [ "${INFLIGHT:-0}" -gt 4 ]; then
             echo "Too many concurrent smoke-test runs ($INFLIGHT); not re-dispatching."
@@ -481,7 +483,7 @@ jobs:
         if: steps.check.outputs.should_dispatch == 'true'
         run: |
           NATIVE_VERSION="${{ github.event.inputs.nativeVersion || '5.4.12-2.0.4-x9' }}"
-          gh workflow run smoke-test.yml \
+          gh workflow run --repo "${{ github.repository }}" smoke-test.yml \
             -f nativeVersion="$NATIVE_VERSION"
           echo "Re-dispatch triggered; a fresh workflow run will start on a new runner pool."
 
