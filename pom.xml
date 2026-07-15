@@ -37,7 +37,7 @@
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <native.version>5.4.12-2.0.4-x9</native.version>
-        <panama.version>5.4.12-rc8</panama.version>
+        <panama.version>5.4.12-rc9</panama.version>
         <javacpp.version>1.5.12</javacpp.version>
         <javacpp.platform>${os.detected.classifier}</javacpp.platform>
         <jmh.version>1.37</jmh.version>
