@@ -30,6 +30,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
@@ -302,6 +303,41 @@ public class PanamaAdapter implements DualApi {
         DualExpression[] expressionsById;
     }
 
+    private static final ThreadLocal<AdapterByteMatchHandler> ADAPTER_BYTE_HANDLER =
+            ThreadLocal.withInitial(AdapterByteMatchHandler::new);
+    private static final ThreadLocal<AdapterStringMatchHandler> ADAPTER_STRING_HANDLER =
+            ThreadLocal.withInitial(AdapterStringMatchHandler::new);
+
+    private static final class AdapterByteMatchHandler implements ByteMatchEventHandler {
+        DualByteMatchHandler handler;
+
+        @Override
+        public boolean onMatch(Expression expression, long from, long to) {
+            return handler.onMatch(toDualExpression(expression), from, to);
+        }
+
+        static AdapterByteMatchHandler bind(DualByteMatchHandler handler) {
+            AdapterByteMatchHandler h = ADAPTER_BYTE_HANDLER.get();
+            h.handler = handler;
+            return h;
+        }
+    }
+
+    private static final class AdapterStringMatchHandler implements StringMatchEventHandler {
+        DualStringMatchHandler handler;
+
+        @Override
+        public boolean onMatch(Expression expression, long from, long to) {
+            return handler.onMatch(toDualExpression(expression), from, to);
+        }
+
+        static AdapterStringMatchHandler bind(DualStringMatchHandler handler) {
+            AdapterStringMatchHandler h = ADAPTER_STRING_HANDLER.get();
+            h.handler = handler;
+            return h;
+        }
+    }
+
     private static DualExpression[] buildExpressionLookup(List<DualExpression> expressions) {
         int maxId = -1;
         for (DualExpression expr : expressions) {
@@ -519,36 +555,21 @@ public class PanamaAdapter implements DualApi {
     public void scan(DualScanner scanner, DualDatabase database, String input, DualStringMatchHandler handler) {
         PanamaScanner s = (PanamaScanner) scanner;
         PanamaDatabase db = (PanamaDatabase) database;
-        s.scanner().scan(db.database(), input, new StringMatchEventHandler() {
-            @Override
-            public boolean onMatch(Expression expression, long from, long to) {
-                return handler.onMatch(toDualExpression(expression), from, to);
-            }
-        });
+        s.scanner().scan(db.database(), input, AdapterStringMatchHandler.bind(handler));
     }
 
     @Override
     public void scan(DualScanner scanner, DualDatabase database, byte[] input, DualByteMatchHandler handler) {
         PanamaScanner s = (PanamaScanner) scanner;
         PanamaDatabase db = (PanamaDatabase) database;
-        s.scanner().scan(db.database(), input, new ByteMatchEventHandler() {
-            @Override
-            public boolean onMatch(Expression expression, long from, long to) {
-                return handler.onMatch(toDualExpression(expression), from, to);
-            }
-        });
+        s.scanner().scan(db.database(), input, AdapterByteMatchHandler.bind(handler));
     }
 
     @Override
     public void scan(DualScanner scanner, DualDatabase database, ByteBuffer input, DualByteMatchHandler handler) {
         PanamaScanner s = (PanamaScanner) scanner;
         PanamaDatabase db = (PanamaDatabase) database;
-        s.scanner().scan(db.database(), input, new ByteMatchEventHandler() {
-            @Override
-            public boolean onMatch(Expression expression, long from, long to) {
-                return handler.onMatch(toDualExpression(expression), from, to);
-            }
-        });
+        s.scanner().scan(db.database(), input, AdapterByteMatchHandler.bind(handler));
     }
 
     @Override
@@ -1881,12 +1902,33 @@ public class PanamaAdapter implements DualApi {
         throw new IllegalArgumentException("Unsupported database type: " + database.getClass());
     }
 
+    private static final MethodHandle DB_GET_DATABASE;
+    private static final MethodHandle STATE_GET_SCRATCH;
+
+    static {
+        try {
+            Method m = com.xenoamess.hyperscan_panama.wrapper.Database.class.getDeclaredMethod("getDatabase");
+            m.setAccessible(true);
+            DB_GET_DATABASE = MethodHandles.lookup().unreflect(m);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        try {
+            Field stateField = Scanner.class.getDeclaredField("state");
+            stateField.setAccessible(true);
+            Class<?> stateClass = stateField.getType();
+            Method getScratchMethod = stateClass.getDeclaredMethod("getScratch");
+            getScratchMethod.setAccessible(true);
+            STATE_GET_SCRATCH = MethodHandles.lookup().unreflect(getScratchMethod);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private static MemorySegment getNativeDatabaseHandle(com.xenoamess.hyperscan_panama.wrapper.Database database) {
         try {
-            Method method = com.xenoamess.hyperscan_panama.wrapper.Database.class.getDeclaredMethod("getDatabase");
-            method.setAccessible(true);
-            return (MemorySegment) method.invoke(database);
-        } catch (Exception e) {
+            return (MemorySegment) DB_GET_DATABASE.invoke(database);
+        } catch (Throwable e) {
             throw new RuntimeException(e);
         }
     }
@@ -1909,10 +1951,8 @@ public class PanamaAdapter implements DualApi {
             Field stateField = Scanner.class.getDeclaredField("state");
             stateField.setAccessible(true);
             Object state = stateField.get(scanner);
-            Method getScratch = state.getClass().getDeclaredMethod("getScratch");
-            getScratch.setAccessible(true);
-            return (MemorySegment) getScratch.invoke(state);
-        } catch (Exception e) {
+            return (MemorySegment) STATE_GET_SCRATCH.invoke(state);
+        } catch (Throwable e) {
             throw new RuntimeException(e);
         }
     }
