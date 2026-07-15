@@ -118,6 +118,24 @@ def scenario_names(results):
     return sorted(names)
 
 
+PLATFORM_ORDER = [
+    'linux-x86_64',
+    'linux-x86_64-avx2',
+    'linux-x86_64-baseline',
+    'linux-arm64',
+    'linux-arm64-baseline',
+    'windows-x86_64',
+    'windows-x86_64-baseline',
+]
+
+
+def platform_sort_key(platform):
+    try:
+        return PLATFORM_ORDER.index(platform)
+    except ValueError:
+        return len(PLATFORM_ORDER)
+
+
 def sanitize_filename(name):
     return re.sub(r'[^A-Za-z0-9_-]+', '_', name)
 
@@ -147,7 +165,7 @@ def build_platform_rows(results, scenario_name):
             'unit': unit
         })
 
-    rows.sort(key=lambda x: x['bestThroughput'], reverse=True)
+    rows.sort(key=lambda x: platform_sort_key(x['platform']))
     return rows, unit
 
 

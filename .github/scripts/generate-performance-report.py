@@ -46,6 +46,24 @@ def format_num(value, decimals=2):
         return str(value)
 
 
+PLATFORM_ORDER = [
+    'linux-x86_64',
+    'linux-x86_64-avx2',
+    'linux-x86_64-baseline',
+    'linux-arm64',
+    'linux-arm64-baseline',
+    'windows-x86_64',
+    'windows-x86_64-baseline',
+]
+
+
+def platform_sort_key(platform):
+    try:
+        return PLATFORM_ORDER.index(platform)
+    except ValueError:
+        return len(PLATFORM_ORDER)
+
+
 def sanitize_filename(name):
     return re.sub(r'[^A-Za-z0-9_-]+', '_', name)
 
@@ -167,7 +185,7 @@ def build_platform_summary(results, scenario_name):
             'results': list(impls.values())
         })
 
-    rows.sort(key=lambda x: x['bestThroughput'], reverse=True)
+    rows.sort(key=lambda x: platform_sort_key(x['platform']))
     return rows
 
 
@@ -199,7 +217,7 @@ def build_scenario_rows(results, scenario_name):
             'ns_per_op': ns_per_op_for(r, scenario_name),
             'total_matches': total_matches_for(r, scenario_name)
         })
-    rows.sort(key=lambda x: (x['platform'], x['implementation']))
+    rows.sort(key=lambda x: (platform_sort_key(x['platform']), 0 if x['implementation'] == 'javacpp' else 1))
     return rows
 
 
@@ -241,7 +259,7 @@ def build_scenario_chart_rows(results, scenario_name):
             'metric_type': metric_type
         })
 
-    rows.sort(key=lambda x: max(x['javacpp'], x['panama']), reverse=True)
+    rows.sort(key=lambda x: platform_sort_key(x['platform']))
     return rows
 
 

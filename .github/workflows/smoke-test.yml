@@ -172,7 +172,7 @@ jobs:
           path: target/surefire-reports/
 
   benchmark:
-    name: Benchmark ${{ matrix.impl }} on ${{ matrix.platform }}
+    name: Benchmark ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')
     defaults:
@@ -181,7 +181,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        impl: [JAVACPP, PANAMA]
         platform: [linux-x86_64-baseline, linux-x86_64-avx2, linux-x86_64, linux-arm64-baseline, linux-arm64, windows-x86_64-baseline, windows-x86_64]
         include:
           - platform: linux-x86_64-baseline
@@ -304,16 +303,27 @@ jobs:
               ;;
           esac
 
-      - name: Run JMH benchmarks for ${{ matrix.impl }} on ${{ matrix.platform }}
+      - name: Run JMH benchmarks for JAVACPP on ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED != 'true'
         run: |
-          set -euo pipefail
           mvn -B -U test \
             -Dtest=JmhBenchmarkRunner \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
             -Djavacpp.platform=${{ matrix.platform }} \
             -Dhyperscan.benchmarks.enabled=true \
-            -Dhyperscan.benchmark.implementation=${{ matrix.impl }} \
+            -Dhyperscan.benchmark.implementation=JAVACPP \
+            -Dhyperscan.benchmarks.large.enabled=true \
+            -Dbenchmark.platform=${{ matrix.platform }}
+
+      - name: Run JMH benchmarks for PANAMA on ${{ matrix.platform }}
+        if: steps.cpu-check.outputs.SKIPPED != 'true'
+        run: |
+          mvn -B -U test \
+            -Dtest=JmhBenchmarkRunner \
+            -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
+            -Djavacpp.platform=${{ matrix.platform }} \
+            -Dhyperscan.benchmarks.enabled=true \
+            -Dhyperscan.benchmark.implementation=PANAMA \
             -Dhyperscan.benchmarks.large.enabled=true \
             -Dbenchmark.platform=${{ matrix.platform }}
 
@@ -326,7 +336,7 @@ jobs:
         if: always() && steps.cpu-check.outputs.SKIPPED != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: benchmark-raw-${{ matrix.impl }}-${{ matrix.platform }}
+          name: benchmark-raw-${{ matrix.platform }}
           path: target/benchmark-results/
           if-no-files-found: warn
 
