@@ -74,7 +74,7 @@
 
 ## 大流量场景加入性能报告实施计划（已实施）
 
-目标：将 `BehaviourTest` 中的大流量场景作为 benchmark 加入 `BenchmarkSuiteTest`，使其结果出现在性能报告里。
+目标：将 `BehaviourTest` 中的大流量场景作为 benchmark 加入基准套件，使其结果出现在性能报告里。
 
 ### 说明
 
@@ -84,13 +84,13 @@
 ### 实施结果
 
 1. 已新增开关 `hyperscan.benchmarks.large.enabled`，默认值 `true`。
-2. 已新增三个 benchmark 方法：
-   - `benchmarkScanSeveralGigabytesNoMatch`：5GB，1MB 分块，STREAM，单次测量，记录吞吐。
-   - `benchmarkScanGigabytesStreamingMatch`：13 个 case 全部，1GB 和 2GB 各跑，STREAM，单次测量，记录吞吐/匹配数。
-   - `benchmarkScanGigabytesBlockMatch`：13 个 case 全部，1MB 块，BLOCK，多次测量，记录吞吐/匹配数。
-3. 每个 benchmark 都按 `DualImplementation` 同时跑 JavaCpp 和 Panama。
+2. 已新增三个 benchmark（现为 JMH 基准类，位于 `com.xenoamess.hyperscan.smoke.benchmarks.jmh.large`）：
+   - `ScanSeveralGigabytesNoMatchBenchmark`：5GB，1MB 分块，STREAM，单次测量，记录吞吐。
+   - `ScanGigabytesStreamingMatchBenchmark`：13 个 case 全部，1GB 和 2GB 各跑，STREAM，单次测量，记录吞吐/匹配数。
+   - `ScanGigabytesBlockMatchBenchmark`：13 个 case 全部，1MB 块，BLOCK，多次测量，记录吞吐/匹配数。
+3. 每个 benchmark 都按 `DualImplementation` 同时跑 JavaCpp 和 Panama（CI 中由 `JmhBenchmarkRunner` 分别以 `-Dhyperscan.benchmark.implementation=JAVACPP/PANAMA` 运行）。
 4. `BenchmarkResult` 记录：`inputBytes`、`matches`、`elapsedMs`、`throughputMBps`。
-5. 现有 `BenchmarkSuiteTest` benchmark 保持不变。
+5. 全部基准场景已统一迁移到 JMH（`com.xenoamess.hyperscan.smoke.benchmarks.jmh`，由 `JmhBenchmarkRunner` 执行），原 `BenchmarkSuiteTest` 已移除。
 6. `.github/workflows/smoke-test.yml` 的 `mvn -B test` 已显式加上 `-Dhyperscan.benchmarks.large.enabled=true`。
 7. 报告脚本 `generate-performance-report.py` / `generate-performance-svg.py` 已支持 `throughputMBps` 指标（原有指标为 `throughputMBpsAvg`）。
-8. 全量测试：4119 个测试，0 失败，0 错误，46 跳过。
+8. 实施时全量测试：4119 个测试，0 失败，0 错误，46 跳过。

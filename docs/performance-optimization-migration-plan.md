@@ -109,6 +109,6 @@
 - [x] `hyperscan-java-panama`：审计 `hs_alloc_t` / `hs_free_t` 是否同样可优化（结论：不适用）
 - [x] `hyperscan-java-panama/performance`：同步 warm-up / 确定性数据生成（结论：已具备）
 - [x] `hyperscan-java-native` / `hyperscan-java-panama/native`：对齐 Vectorscan 编译参数（结论：Linux 已对齐）
-- [ ] 重新跑 `hyperscan-java-test` CI 验证（待 `hyperscan-java-panama` 新发布版本后触发）
+- [x] 重新跑 `hyperscan-java-test` CI 验证（已随 `hyperscan-java-panama` rc7 → rc12 多次发布跑通；期间 native 构建补充了 LTO，v2/v3 两轮优化已落地）
 - [ ] 可选：排查剩余 `scanGigabytes*` 回归（原生库/加载/variant 选择）
 - [ ] 可选：Arena 复用审计、封装层开销优化
