@@ -37,6 +37,12 @@ jobs:
           - os: linux
             runner: ubuntu-24.04
             platform: linux-x86_64
+          - os: linux
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64-baseline
+          - os: linux
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64
           - os: windows
             runner: windows-latest
             platform: windows-x86_64-baseline
@@ -175,7 +181,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [linux-x86_64-baseline, linux-x86_64-avx2, linux-x86_64, windows-x86_64-baseline, windows-x86_64]
+        platform: [linux-x86_64-baseline, linux-x86_64-avx2, linux-x86_64, linux-arm64-baseline, linux-arm64, windows-x86_64-baseline, windows-x86_64]
         include:
           - platform: linux-x86_64-baseline
             os: linux
@@ -186,6 +192,12 @@ jobs:
           - platform: linux-x86_64
             os: linux
             runner: ubuntu-24.04
+          - platform: linux-arm64-baseline
+            os: linux
+            runner: ubuntu-24.04-arm
+          - platform: linux-arm64
+            os: linux
+            runner: ubuntu-24.04-arm
           - platform: windows-x86_64-baseline
             os: windows
             runner: windows-latest
