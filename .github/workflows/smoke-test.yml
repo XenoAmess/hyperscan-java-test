@@ -9,7 +9,7 @@ on:
       nativeVersion:
         description: 'Native artifact version to test (e.g. 5.4.12-2.0.4-x9)'
         required: true
-        default: '5.4.12-2.0.4-x9'
+        default: '5.4.12-2.0.4-x10'
 
 permissions:
   contents: read
