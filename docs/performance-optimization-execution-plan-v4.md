@@ -56,7 +56,7 @@ v2/v3 已彻底落地（LTO、直接 upcall stub、handler 复用、表达式数
 
 | # | Commit | 要点 |
 |---|---|---|
-| 7 | `perf(preset): mark short no-callback JNI functions @Critical` | InfoMap 注解 `hs_version`/`hs_valid_platform`/`hs_database_size`/`hs_scratch_size`/`hs_stream_size`/`hs_database_info`/`hs_serialized_database_info`/`hs_free_database`/`hs_free_scratch`/`hs_free_compile_error`；排除 `hs_scan*`（upcall）、`hs_close_stream`（可能触发回调）、`hs_compile*`（长调用）；验证生成的 `hyperscan.java` 含 `@Critical` 且编译通过 |
+| 7 | ~~`perf(preset): mark short no-callback JNI functions @Critical`~~ **不可行，已取消** | 实施中发现 JavaCPP（1.5.11–1.5.13 全部版本）**不存在 `@Critical` 注解**，FFM `Linker.Option.critical` 在 JavaCPP 侧无对应物。仅有的 `CriticalRegion` 针对 Java 数组参数（GetPrimitiveArrayCritical），与 hs 短函数（Pointer 参数）无关。JavaCPP 生成的 JNI 已是直接 C 调用，无注解可进一步降低 per-call 开销。已还原 preset 改动，不产生 commit。#8（Panama 侧 `critical(true)`）不受影响 |
 
 ### C. hyperscan-java-panama（`master`，8 commits，每步按该仓 AGENTS.md 验证）
 
@@ -89,13 +89,13 @@ v2/v3 已彻底落地（LTO、直接 upcall stub、handler 复用、表达式数
 
 ## 五、进度追踪
 
-- [ ] #1 wrapper byte[] scan ThreadLocal buffer
-- [ ] #2 wrapper public ByteBuffer scan
-- [ ] #3 wrapper expressionsById 数组索引
-- [ ] #4 wrapper ASCII 跳过映射分配
-- [ ] #5 wrapper bitmaskToFlag static final
-- [ ] #6 wrapper stream/vectored API
-- [ ] #7 native preset @Critical
+- [x] #1 wrapper byte[] scan ThreadLocal buffer
+- [x] #2 wrapper public ByteBuffer scan
+- [x] #3 wrapper expressionsById 数组索引
+- [x] #4 wrapper ASCII 跳过映射分配
+- [x] #5 wrapper bitmaskToFlag static final
+- [x] #6 wrapper stream/vectored API
+- [x] #7 native preset @Critical（评估后取消：JavaCPP 无此 API，详见 B 节）
 - [ ] #8 panama critical(true)
 - [ ] #9 panama heap ByteBuffer SCAN_BUFFER
 - [ ] #10 panama 非 ASCII 双重视图
