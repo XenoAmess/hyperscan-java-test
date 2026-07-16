@@ -15,6 +15,12 @@
 - Run the project's test command (`mvn test` for this project) after non-trivial changes and before committing.
 - If lint or typecheck commands are defined in the build configuration, run those as well.
 
+## Version Bumps
+
+- `native.version` 和 `panama.version` 只维护在 `pom.xml`，是版本号的唯一来源；不要在 workflow、脚本或文档中硬编码同一版本号。
+- smoke-test workflow 的 `nativeVersion` input 仅用于手动覆盖；留空时 CI 自动从 `pom.xml` 读取 `native.version`。
+- bump 版本只需改 `pom.xml`；若发现其他地方出现版本字面量，应消除引用而不是同步修改。
+
 ## Style
 
 - Follow existing code style and naming conventions.
