@@ -96,11 +96,22 @@ v2/v3 已彻底落地（LTO、直接 upcall stub、handler 复用、表达式数
 - [x] #5 wrapper bitmaskToFlag static final
 - [x] #6 wrapper stream/vectored API
 - [x] #7 native preset @Critical（评估后取消：JavaCPP 无此 API，详见 B 节）
-- [ ] #8 panama critical(true)
-- [ ] #9 panama heap ByteBuffer SCAN_BUFFER
-- [ ] #10 panama 非 ASCII 双重视图
-- [ ] #11 panama 映射表定长
-- [ ] #12 panama isAscii 字长
-- [ ] #13 panama compile 单 arena
-- [ ] #14 panama stream/vectored API
-- [ ] #15 panama knowledge-base P7 记录
+- [x] #8 panama critical(true)
+- [x] #9 panama heap ByteBuffer SCAN_BUFFER
+- [x] #10 panama 非 ASCII 双重视图
+- [x] #11 panama 映射表定长
+- [x] #12 panama isAscii 字长
+- [x] #13 panama compile 单 arena
+- [x] #14 panama stream/vectored API
+- [x] #15 panama knowledge-base P7 记录
+
+## 六、实施记录（2026-07-17 完成）
+
+- hyperscan-java（`perf/optimize-wrapper`）：`6983914` #1、`29c9cbc` #2、`14865db` #3、`8e8454a` #4、`8c2c0cf` #5、`b367a8b` #6
+- hyperscan-java-panama（`main`）：`0f9dee3` #8、`575fe3c` #9、`e79a42f` #10、`5dac193`+`3a52043` #11、`2b1f548` #12、`d816bae` #13、`f767e30` #14、`08241a8` #15
+- hyperscan-java-native：#7 评估后取消，无 commit
+- 实施中发现的计划偏差：
+  - vectored 数据库必须按 `HS_MODE_VECTORED` 编译、stream 按 `HS_MODE_STREAM` 编译 —— 两个 wrapper 均新增 `Mode` 枚举与 mode 感知 compile 重载，并在 openStream/scanVector 做客户端校验（反序列化数据库 mode 不可知，跳过校验）
+  - vectored  offset 语义为"相对首段的全局偏移"（段逻辑拼接），javadoc 与测试按此修正
+  - streaming 模式下 SOM flag 需要 horizon 精度模式，测试表达式未使用 SOM
+  - hyperscan-java 与 panama 测试中的 JMH `Mode` 注解与新 `Mode` 枚举冲突，通过显式 import 消解
