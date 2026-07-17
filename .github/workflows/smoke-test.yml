@@ -429,24 +429,27 @@ jobs:
           path: benchmark-raw
           pattern: benchmark-raw-*
 
-      - name: Download previous successful run's benchmark raw results
-        uses: dawidd6/action-download-artifact@v21
-        continue-on-error: true
-        with:
-          workflow: smoke-test.yml
-          branch: ${{ github.ref_name }}
-          workflow_conclusion: success
-          name: benchmark-raw-.*
-          name_is_regexp: true
-          path: benchmark-raw-previous
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Merge with previous run results
+      - name: Download previous successful runs' benchmark raw results
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
+          set -uo pipefail
+          # Backfill cells missing from this run with data from up to the 5 most
+          # recent successful runs of this workflow (recency order). AVX-512 and
+          # SVE2 runners are scarce enough that several consecutive runs can miss
+          # the same cell, so depth 1 is not sufficient.
+          RUN_IDS=$(gh api "repos/${{ github.repository }}/actions/workflows/smoke-test.yml/runs?per_page=30" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success" and .id != ${{ github.run_id }})][0:5][].id')
+          for RUN_ID in $RUN_IDS; do
+            gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+              -p 'benchmark-raw-*' -D "benchmark-raw-prev-$RUN_ID" 2>/dev/null || true
+          done
+          PREV_DIRS=$(ls -d benchmark-raw-prev-* 2>/dev/null || true)
           python3 .github/scripts/merge-benchmark-results.py \
             benchmark-raw \
-            benchmark-raw-previous \
-            benchmark-raw-merged
+            benchmark-raw-merged \
+            $PREV_DIRS
 
       - name: Generate performance report
         run: |

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Merge benchmark results from the current run with the previous successful run.
+"""Merge benchmark results from the current run with previous successful runs.
 
 Current-run results always win on a (platform, implementation) key. Entries
-present only in the previous run are copied through with "stale": true injected
-so the report can mark them as older data instead of dropping the row entirely.
+absent from the current run are backfilled from previous runs (checked in
+recency order, first occurrence wins) and tagged with "stale": true so the
+report can mark them as older data instead of dropping the row entirely.
+
+Usage: merge-benchmark-results.py <current-dir> <out-dir> [previous-dir...]
+Previous dirs are consulted in the order given (most recent first).
 """
 import json
 import os
-import shutil
 import sys
 
 
@@ -43,15 +46,14 @@ def implementation_from_name(name):
 
 def main():
     if len(sys.argv) < 3:
-        print('Usage: merge-benchmark-results.py <current-dir> <previous-dir> <out-dir>', file=sys.stderr)
+        print('Usage: merge-benchmark-results.py <current-dir> <out-dir> [previous-dir...]', file=sys.stderr)
         sys.exit(1)
-    current_dir, previous_dir, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+    current_dir, out_dir = sys.argv[1], sys.argv[2]
+    previous_dirs = sys.argv[3:]
 
     current = load_results(current_dir)
-    previous = load_results(previous_dir)
 
     os.makedirs(out_dir, exist_ok=True)
-    stale_count = 0
     for key, (path, data) in current.items():
         with open(path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -59,16 +61,19 @@ def main():
         with open(os.path.join(out_dir, out_name), 'w', encoding='utf-8') as f:
             f.write(content)
 
-    for key, (path, data) in previous.items():
-        if key in current:
-            continue
-        data['stale'] = True
+    stale = {}
+    for previous_dir in previous_dirs:
+        for key, (path, data) in load_results(previous_dir).items():
+            if key not in current and key not in stale:
+                data['stale'] = True
+                stale[key] = data
+
+    for key, data in stale.items():
         out_name = f"benchmark-result-{key[0]}-{key[1]}.json"
         with open(os.path.join(out_dir, out_name), 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
-        stale_count += 1
 
-    print(f"Merged {len(current)} current results with {stale_count} stale results from the previous run into {out_dir}")
+    print(f"Merged {len(current)} current results with {len(stale)} stale results from {len(previous_dirs)} previous run(s) into {out_dir}")
 
 
 if __name__ == '__main__':
