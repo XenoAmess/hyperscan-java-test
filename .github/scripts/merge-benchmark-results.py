@@ -31,6 +31,12 @@ def load_results(input_dir):
                 continue
             platform = data.get('platform', 'unknown')
             impl = data.get('implementation') or implementation_from_name(name)
+            # Skip broken results with no benchmark data (e.g. a JMH run that
+            # silently produced nothing); they must never poison the report.
+            # Unsupported markers (no benchmarks by design) are kept.
+            if not data.get('benchmarks') and not data.get('unsupported'):
+                print(f"Warning: skipping empty result {path}", file=sys.stderr)
+                continue
             results[(platform, impl)] = (path, data)
     return results
 

@@ -63,6 +63,10 @@ public class JmhBenchmarkRunner {
         Options options = builder.build();
 
         Collection<RunResult> runResults = new Runner(options).run();
+        if (runResults.isEmpty()) {
+            throw new IllegalStateException(
+                    "JMH produced no benchmark results; failing loudly instead of writing an empty report");
+        }
 
         List<BenchmarkResult> benchmarkResults = new ArrayList<>();
         for (RunResult runResult : runResults) {

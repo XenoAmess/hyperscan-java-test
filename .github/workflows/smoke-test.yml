@@ -441,11 +441,16 @@ jobs:
           # the same cell, so depth 1 is not sufficient.
           RUN_IDS=$(gh api "repos/${{ github.repository }}/actions/workflows/smoke-test.yml/runs?per_page=30" \
             --jq '[.workflow_runs[] | select(.conclusion == "success" and .id != ${{ github.run_id }})][0:5][].id')
+          PREV_DIRS=""
           for RUN_ID in $RUN_IDS; do
-            gh run download "$RUN_ID" --repo "${{ github.repository }}" \
-              -p 'benchmark-raw-*' -D "benchmark-raw-prev-$RUN_ID" 2>/dev/null || true
+            if gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+              -p 'benchmark-raw-*' -D "benchmark-raw-prev-$RUN_ID" 2>/dev/null; then
+              PREV_DIRS="$PREV_DIRS benchmark-raw-prev-$RUN_ID"
+            fi
           done
-          PREV_DIRS=$(ls -d benchmark-raw-prev-* 2>/dev/null || true)
+          # PREV_DIRS keeps recency order (newest first); do NOT rebuild it via
+          # ls, which would re-sort alphabetically and poison the merge with the
+          # oldest copy instead of the freshest.
           python3 .github/scripts/merge-benchmark-results.py \
             benchmark-raw \
             benchmark-raw-merged \
