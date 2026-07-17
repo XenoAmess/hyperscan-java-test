@@ -71,8 +71,14 @@
 
 ## 六、进度追踪
 
-- [ ] Commit 1：pom profile + Java 适配 + CI workflow
-- [ ] 验证 1：gliwka flavor 功能子集
-- [ ] 验证 2：UPSTREAM JMH 单场景
-- [ ] Commit 2：报告脚本 + SVG + README
-- [ ] 验证 3：样本目录目检 python 输出
+- [x] Commit 1：pom profile + Java 适配 + CI workflow（`6cd3baa`）
+- [x] 验证 1：gliwka flavor 功能子集（58 测试全绿）
+- [x] 验证 2：UPSTREAM JMH 单场景（`benchmark-result-upstream.json` 含 `"implementation": "upstream"` 与原版自标签版本号）
+- [x] Commit 2：报告脚本 + SVG + README（`db2c13d`）
+- [x] 验证 3：样本目录目检 python 输出（三系列 + unsupported 渲染正确）
+
+### 实施偏差记录
+
+- **activeByDefault 失效**：`native-xenoamess` 用 `activeByDefault` 激活时会被常驻的 OS 激活 profile（panama-linux-*）连带停用；POM `<properties>` 默认值又不参与 property 激活判定。最终方案：`native-xenoamess` 以 `!native.flavor`（属性缺席）激活，不设置 POM 默认值；约定不要显式传 `-Dnative.flavor=xenoamess`。
+- **编译期类缺失**：`HyperscanNativeLoader` 在原版 JAR 中不存在，`import` 直接编译失败；改为 `HyperscanTestHelper.loadNativeLibrary()` 反射调用（`Class.forName` 找不到时走 JavaCPP 自动加载）。`getPlatform()` 改用 `Loader.getPlatform()`，两种 flavor 语义均正确。
+- **双跑测试防三跑**：`dual/DualApiArgumentsSource` 原遍历 `DualImplementation.values()`，新增 UPSTREAM 会导致全部双跑测试变三跑，已改为显式枚举 JAVACPP/PANAMA。
