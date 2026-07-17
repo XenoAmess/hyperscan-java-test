@@ -398,6 +398,16 @@ jobs:
           path: target/benchmark-results/
           if-no-files-found: warn
 
+      - name: Upload crash logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: crash-logs-${{ matrix.platform }}
+          path: |
+            hs_err_pid*.log
+            target/surefire-reports/*.dumpstream
+          if-no-files-found: ignore
+
   report:
     name: Aggregate performance report
     needs: [smoke, benchmark]
