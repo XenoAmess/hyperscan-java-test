@@ -330,6 +330,40 @@ jobs:
             -Dhyperscan.benchmarks.large.enabled=true \
             -Dbenchmark.platform=${{ matrix.platform }}
 
+      # Upstream (com.gliwka.hyperscan:native) has no tier variants and no
+      # windows-x86_64 classifier. On Linux it runs on every tier's runner with
+      # the base platform classifier; results are still attributed to the
+      # current matrix tier via -Dbenchmark.platform.
+      - name: Run JMH benchmarks for UPSTREAM on ${{ matrix.platform }}
+        if: steps.cpu-check.outputs.SKIPPED != 'true' && matrix.os == 'linux'
+        run: |
+          BASE_PLATFORM="${{ matrix.platform }}"
+          BASE_PLATFORM="${BASE_PLATFORM%-avx2}"
+          BASE_PLATFORM="${BASE_PLATFORM%-baseline}"
+          mvn -B -U test \
+            -Dtest=JmhBenchmarkRunner \
+            -Dnative.flavor=gliwka \
+            -Djavacpp.platform=$BASE_PLATFORM \
+            -Dhyperscan.benchmarks.enabled=true \
+            -Dhyperscan.benchmark.implementation=UPSTREAM \
+            -Dhyperscan.benchmarks.large.enabled=true \
+            -Dbenchmark.platform=${{ matrix.platform }}
+
+      - name: Mark UPSTREAM unsupported on ${{ matrix.platform }}
+        if: steps.cpu-check.outputs.SKIPPED != 'true' && matrix.os == 'windows'
+        shell: bash
+        run: |
+          mkdir -p target/benchmark-results
+          cat > target/benchmark-results/benchmark-result-upstream.json <<EOF
+          {
+            "platform": "${{ matrix.platform }}",
+            "implementation": "upstream",
+            "unsupported": true,
+            "reason": "com.gliwka.hyperscan:native publishes no windows-x86_64 classifier",
+            "benchmarks": []
+          }
+          EOF
+
       - name: Skip JMH benchmarks for ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED == 'true'
         run: |

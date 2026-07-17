@@ -38,6 +38,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <native.version>5.4.12-2.0.4-x10</native.version>
         <panama.version>5.4.12-rc14</panama.version>
+        <upstream.version>5.4.12-2.0.4</upstream.version>
         <javacpp.version>1.5.12</javacpp.version>
         <javacpp.platform>${os.detected.classifier}</javacpp.platform>
         <jmh.version>1.37</jmh.version>
@@ -112,58 +113,6 @@
             </exclusions>
         </dependency>
 
-        <!--
-            Modified native artifacts used by the original low-level smoke tests
-            and by the hyperscan-java wrapper.
-        -->
-        <dependency>
-            <groupId>com.xenoamess.hyperscan</groupId>
-            <artifactId>native</artifactId>
-            <version>${native.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.bytedeco</groupId>
-                    <artifactId>javacpp-platform</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>com.xenoamess.hyperscan</groupId>
-            <artifactId>native</artifactId>
-            <version>${native.version}</version>
-            <classifier>linux-x86_64</classifier>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.bytedeco</groupId>
-                    <artifactId>javacpp-platform</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>com.xenoamess.hyperscan</groupId>
-            <artifactId>native</artifactId>
-            <version>${native.version}</version>
-            <classifier>linux-arm64</classifier>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.bytedeco</groupId>
-                    <artifactId>javacpp-platform</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>com.xenoamess.hyperscan</groupId>
-            <artifactId>native</artifactId>
-            <version>${native.version}</version>
-            <classifier>windows-x86_64</classifier>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.bytedeco</groupId>
-                    <artifactId>javacpp-platform</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
         <dependency>
             <groupId>org.bytedeco</groupId>
             <artifactId>javacpp</artifactId>
@@ -234,6 +183,112 @@
     </dependencies>
 
     <profiles>
+        <!--
+            Default native flavor (modified xenoamess artifacts). Active unless
+            -Dnative.flavor is passed; do NOT pass -Dnative.flavor=xenoamess
+            explicitly (property-based activation cannot model "default value",
+            so this profile keys on the property's absence instead).
+        -->
+        <profile>
+            <id>native-xenoamess</id>
+            <activation>
+                <property>
+                    <name>!native.flavor</name>
+                </property>
+            </activation>
+            <dependencies>
+                <!--
+                    Modified native artifacts used by the original low-level smoke tests
+                    and by the hyperscan-java wrapper.
+                -->
+                <dependency>
+                    <groupId>com.xenoamess.hyperscan</groupId>
+                    <artifactId>native</artifactId>
+                    <version>${native.version}</version>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.bytedeco</groupId>
+                            <artifactId>javacpp-platform</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>com.xenoamess.hyperscan</groupId>
+                    <artifactId>native</artifactId>
+                    <version>${native.version}</version>
+                    <classifier>linux-x86_64</classifier>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.bytedeco</groupId>
+                            <artifactId>javacpp-platform</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>com.xenoamess.hyperscan</groupId>
+                    <artifactId>native</artifactId>
+                    <version>${native.version}</version>
+                    <classifier>linux-arm64</classifier>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.bytedeco</groupId>
+                            <artifactId>javacpp-platform</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>com.xenoamess.hyperscan</groupId>
+                    <artifactId>native</artifactId>
+                    <version>${native.version}</version>
+                    <classifier>windows-x86_64</classifier>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.bytedeco</groupId>
+                            <artifactId>javacpp-platform</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <!--
+            Upstream (gliwka) native artifacts for the third benchmark implementation.
+            Mutually exclusive with native-xenoamess: both provide com.gliwka.hyperscan.jni.*.
+            No windows-x86_64 classifier exists upstream; CI writes an unsupported marker there.
+        -->
+        <profile>
+            <id>native-gliwka</id>
+            <activation>
+                <property>
+                    <name>native.flavor</name>
+                    <value>gliwka</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.gliwka.hyperscan</groupId>
+                    <artifactId>native</artifactId>
+                    <version>${upstream.version}</version>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.bytedeco</groupId>
+                            <artifactId>javacpp-platform</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>com.gliwka.hyperscan</groupId>
+                    <artifactId>native</artifactId>
+                    <version>${upstream.version}</version>
+                    <classifier>${upstream.native.classifier}</classifier>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.bytedeco</groupId>
+                            <artifactId>javacpp-platform</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
         <profile>
             <id>panama-linux-x86_64</id>
             <activation>
@@ -244,6 +299,7 @@
             </activation>
             <properties>
                 <panama.native.classifier>linux-x86_64</panama.native.classifier>
+                <upstream.native.classifier>linux-x86_64</upstream.native.classifier>
             </properties>
         </profile>
         <profile>
@@ -256,6 +312,7 @@
             </activation>
             <properties>
                 <panama.native.classifier>linux-arm64</panama.native.classifier>
+                <upstream.native.classifier>linux-arm64</upstream.native.classifier>
             </properties>
         </profile>
         <profile>

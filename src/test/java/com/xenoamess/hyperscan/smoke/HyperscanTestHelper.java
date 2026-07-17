@@ -17,6 +17,24 @@ public final class HyperscanTestHelper {
     private HyperscanTestHelper() {
     }
 
+    /**
+     * Loads the JavaCPP native library, using the fork's tier-selecting
+     * HyperscanNativeLoader when present. The upstream (gliwka) native
+     * artifact has no such class; there JavaCPP loads the library via the
+     * generated class's static initializer.
+     */
+    public static void loadNativeLibrary() {
+        try {
+            Class.forName("com.gliwka.hyperscan.jni.HyperscanNativeLoader")
+                    .getMethod("load")
+                    .invoke(null);
+        } catch (ClassNotFoundException e) {
+            // Upstream (gliwka) native: fall back to JavaCPP auto-loading.
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
     public static hs_database_t hsCompileMulti(String[] patterns, int[] ids, int[] flags) {
         PointerPointer<BytePointer> expressionsPointer = new PointerPointer<>(patterns);
         IntPointer patternIds = new IntPointer(ids);

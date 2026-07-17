@@ -19,6 +19,7 @@ public class BenchmarkRecorder {
     private final String runnerArch;
     private final String cpuModel;
     private final String cpuFlags;
+    private final String implementation;
     private final String outputFile;
     private final String timestamp;
     private final List<BenchmarkResult> benchmarks;
@@ -39,6 +40,7 @@ public class BenchmarkRecorder {
         this.runnerArch = runnerArch;
         this.cpuModel = cpuModel;
         this.cpuFlags = cpuFlags;
+        this.implementation = implementation;
         String defaultFile = implementation == null
                 ? "benchmark-result.json"
                 : "benchmark-result-" + implementation + ".json";
@@ -70,6 +72,9 @@ public class BenchmarkRecorder {
         sb.append("  \"runnerArch\": ").append(jsonString(runnerArch)).append(",\n");
         sb.append("  \"cpuModel\": ").append(jsonString(cpuModel)).append(",\n");
         sb.append("  \"cpuFlags\": ").append(jsonString(cpuFlags)).append(",\n");
+        if (implementation != null) {
+            sb.append("  \"implementation\": ").append(jsonString(implementation)).append(",\n");
+        }
         sb.append("  \"timestamp\": ").append(jsonString(timestamp)).append(",\n");
         sb.append("  \"benchmarks\": [\n");
         for (int i = 0; i < benchmarks.size(); i++) {

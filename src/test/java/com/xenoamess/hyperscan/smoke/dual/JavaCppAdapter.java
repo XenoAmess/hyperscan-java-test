@@ -1,6 +1,5 @@
 package com.xenoamess.hyperscan.smoke.dual;
 
-import com.gliwka.hyperscan.jni.HyperscanNativeLoader;
 import com.gliwka.hyperscan.jni.hs_alloc_t;
 import com.gliwka.hyperscan.jni.hs_compile_error_t;
 import com.gliwka.hyperscan.jni.hs_database_t;
@@ -19,6 +18,7 @@ import com.gliwka.hyperscan.wrapper.Expression;
 import com.gliwka.hyperscan.wrapper.ExpressionFlag;
 import com.gliwka.hyperscan.wrapper.Match;
 import com.gliwka.hyperscan.wrapper.StringMatchEventHandler;
+import com.xenoamess.hyperscan.smoke.HyperscanTestHelper;
 
 import org.bytedeco.javacpp.BytePointer;
 import org.bytedeco.javacpp.IntPointer;
@@ -55,7 +55,7 @@ public class JavaCppAdapter implements DualApi {
     private static final Unsafe UNSAFE = getUnsafe();
 
     static {
-        HyperscanNativeLoader.load();
+        HyperscanTestHelper.loadNativeLibrary();
     }
 
     private static Unsafe getUnsafe() {
@@ -808,7 +808,7 @@ public class JavaCppAdapter implements DualApi {
 
     @Override
     public String getPlatform() {
-        return HyperscanNativeLoader.selectPlatform();
+        return Loader.getPlatform();
     }
 
     @Override

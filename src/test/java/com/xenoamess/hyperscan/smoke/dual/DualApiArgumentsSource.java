@@ -10,7 +10,9 @@ public class DualApiArgumentsSource implements ArgumentsProvider {
 
     @Override
     public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-        return Stream.of(DualImplementation.values())
+        // UPSTREAM is a benchmark-only comparison target and must not
+        // participate in dual-run functional tests.
+        return Stream.of(DualImplementation.JAVACPP, DualImplementation.PANAMA)
                 .map(impl -> Arguments.of(impl.createAdapter()));
     }
 }
