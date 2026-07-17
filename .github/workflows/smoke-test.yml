@@ -9,6 +9,10 @@ on:
       nativeVersion:
         description: 'Native artifact version to test (leave empty to use native.version from pom.xml)'
         required: false
+      platforms:
+        description: 'Comma-separated platform subset to run (empty = full matrix, e.g. "linux-x86_64,linux-arm64")'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -17,37 +21,52 @@ permissions:
   actions: write
 
 jobs:
+  setup:
+    name: Resolve test matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - name: Resolve matrix
+        id: matrix
+        shell: bash
+        env:
+          PLATFORMS: ${{ github.event.inputs.platforms }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          full = [
+              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64-baseline"},
+              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64-avx2"},
+              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64"},
+              {"os": "linux", "runner": "ubuntu-24.04-arm", "platform": "linux-arm64-baseline"},
+              {"os": "linux", "runner": "ubuntu-24.04-arm", "platform": "linux-arm64"},
+              {"os": "windows", "runner": "windows-latest", "platform": "windows-x86_64-baseline"},
+              {"os": "windows", "runner": "windows-latest", "platform": "windows-x86_64"},
+          ]
+          wanted = [p.strip() for p in os.environ.get("PLATFORMS", "").split(",") if p.strip()]
+          if wanted:
+              known = {c["platform"] for c in full}
+              unknown = [p for p in wanted if p not in known]
+              if unknown:
+                  raise SystemExit(f"unknown platforms: {unknown}")
+              cells = [c for c in full if c["platform"] in wanted]
+          else:
+              cells = full
+          print(f"matrix cells: {[c['platform'] for c in cells]}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("value=" + json.dumps({"include": cells}) + "\n")
+          EOF
   smoke:
     name: ${{ matrix.platform }} on ${{ matrix.runner }}
+    needs: setup
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         shell: bash
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-24.04
-            platform: linux-x86_64-baseline
-          - os: linux
-            runner: ubuntu-24.04
-            platform: linux-x86_64-avx2
-          - os: linux
-            runner: ubuntu-24.04
-            platform: linux-x86_64
-          - os: linux
-            runner: ubuntu-24.04-arm
-            platform: linux-arm64-baseline
-          - os: linux
-            runner: ubuntu-24.04-arm
-            platform: linux-arm64
-          - os: windows
-            runner: windows-latest
-            platform: windows-x86_64-baseline
-          - os: windows
-            runner: windows-latest
-            platform: windows-x86_64
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       DETECTED_PLATFORM: ${{ matrix.platform }}
@@ -174,6 +193,7 @@ jobs:
 
   benchmark:
     name: Benchmark ${{ matrix.platform }}
+    needs: setup
     runs-on: ${{ matrix.runner }}
     if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')
     defaults:
@@ -181,30 +201,7 @@ jobs:
         shell: bash
     strategy:
       fail-fast: false
-      matrix:
-        platform: [linux-x86_64-baseline, linux-x86_64-avx2, linux-x86_64, linux-arm64-baseline, linux-arm64, windows-x86_64-baseline, windows-x86_64]
-        include:
-          - platform: linux-x86_64-baseline
-            os: linux
-            runner: ubuntu-24.04
-          - platform: linux-x86_64-avx2
-            os: linux
-            runner: ubuntu-24.04
-          - platform: linux-x86_64
-            os: linux
-            runner: ubuntu-24.04
-          - platform: linux-arm64-baseline
-            os: linux
-            runner: ubuntu-24.04-arm
-          - platform: linux-arm64
-            os: linux
-            runner: ubuntu-24.04-arm
-          - platform: windows-x86_64-baseline
-            os: windows
-            runner: windows-latest
-          - platform: windows-x86_64
-            os: windows
-            runner: windows-latest
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       DETECTED_PLATFORM: ${{ matrix.platform }}
@@ -309,26 +306,42 @@ jobs:
       - name: Run JMH benchmarks for JAVACPP on ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED != 'true'
         run: |
-          mvn -B -U test \
-            -Dtest=JmhBenchmarkRunner \
-            -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
-            -Djavacpp.platform=${{ matrix.platform }} \
-            -Dhyperscan.benchmarks.enabled=true \
-            -Dhyperscan.benchmark.implementation=JAVACPP \
-            -Dhyperscan.benchmarks.large.enabled=true \
-            -Dbenchmark.platform=${{ matrix.platform }}
+          for attempt in 1 2 3; do
+            if mvn -B -U test \
+              -Dtest=JmhBenchmarkRunner \
+              -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
+              -Djavacpp.platform=${{ matrix.platform }} \
+              -Dhyperscan.benchmarks.enabled=true \
+              -Dhyperscan.benchmark.implementation=JAVACPP \
+              -Dhyperscan.benchmarks.large.enabled=true \
+              -Dbenchmark.platform=${{ matrix.platform }}; then
+              exit 0
+            fi
+            echo "::warning::JAVACPP benchmark attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          echo "::error::JAVACPP benchmark failed after 3 attempts"
+          exit 1
 
       - name: Run JMH benchmarks for PANAMA on ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED != 'true'
         run: |
-          mvn -B -U test \
-            -Dtest=JmhBenchmarkRunner \
-            -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
-            -Djavacpp.platform=${{ matrix.platform }} \
-            -Dhyperscan.benchmarks.enabled=true \
-            -Dhyperscan.benchmark.implementation=PANAMA \
-            -Dhyperscan.benchmarks.large.enabled=true \
-            -Dbenchmark.platform=${{ matrix.platform }}
+          for attempt in 1 2 3; do
+            if mvn -B -U test \
+              -Dtest=JmhBenchmarkRunner \
+              -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
+              -Djavacpp.platform=${{ matrix.platform }} \
+              -Dhyperscan.benchmarks.enabled=true \
+              -Dhyperscan.benchmark.implementation=PANAMA \
+              -Dhyperscan.benchmarks.large.enabled=true \
+              -Dbenchmark.platform=${{ matrix.platform }}; then
+              exit 0
+            fi
+            echo "::warning::PANAMA benchmark attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          echo "::error::PANAMA benchmark failed after 3 attempts"
+          exit 1
 
       # Upstream (com.gliwka.hyperscan:native) has no tier variants and no
       # windows-x86_64 classifier. On Linux it runs on every tier's runner with
@@ -340,14 +353,22 @@ jobs:
           BASE_PLATFORM="${{ matrix.platform }}"
           BASE_PLATFORM="${BASE_PLATFORM%-avx2}"
           BASE_PLATFORM="${BASE_PLATFORM%-baseline}"
-          mvn -B -U test \
-            -Dtest=JmhBenchmarkRunner \
-            -Dnative.flavor=gliwka \
-            -Djavacpp.platform=$BASE_PLATFORM \
-            -Dhyperscan.benchmarks.enabled=true \
-            -Dhyperscan.benchmark.implementation=UPSTREAM \
-            -Dhyperscan.benchmarks.large.enabled=true \
-            -Dbenchmark.platform=${{ matrix.platform }}
+          for attempt in 1 2 3; do
+            if mvn -B -U test \
+              -Dtest=JmhBenchmarkRunner \
+              -Dnative.flavor=gliwka \
+              -Djavacpp.platform=$BASE_PLATFORM \
+              -Dhyperscan.benchmarks.enabled=true \
+              -Dhyperscan.benchmark.implementation=UPSTREAM \
+              -Dhyperscan.benchmarks.large.enabled=true \
+              -Dbenchmark.platform=${{ matrix.platform }}; then
+              exit 0
+            fi
+            echo "::warning::UPSTREAM benchmark attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          echo "::error::UPSTREAM benchmark failed after 3 attempts"
+          exit 1
 
       - name: Mark UPSTREAM unsupported on ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED != 'true' && matrix.os == 'windows'
@@ -527,17 +548,21 @@ jobs:
           # Detect CPU feature misses by listing this run's jobs and looking for
           # any whose Run-tests step was skipped due to a CPU check failure.
           # 'gh run view --log' filters out ::warning:: annotations, so we cannot
-          # grep logs; the jobs API surfaces step outcomes instead.
-          MISSING=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            --jq '[.jobs[] | .steps[]? | select((.name | test("^Run smoke tests for "))
-                                                or (.name | test("^Run JMH benchmarks for ")))
-                 | select(.conclusion == "skipped")] | length')
-          if [ "${MISSING:-0}" -eq 0 ]; then
+          # grep logs; the jobs API surfaces step outcomes instead. Extract the
+          # affected platform names so we can re-run only the missing cells.
+          MISSING_PLATFORMS=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            --jq '[.jobs[] | .steps[]? | select(.conclusion == "skipped") | .name
+                 | select(test("^Run smoke tests for ") or test("^Run JMH benchmarks for "))
+                 | if test("^Run smoke tests for ") then sub("^Run smoke tests for "; "")
+                   else sub("^Run JMH benchmarks for [A-Z]+ on "; "") end]
+                 | unique | join(",")')
+          if [ -z "$MISSING_PLATFORMS" ]; then
             echo "No CPU feature miss detected in this run; not re-dispatching."
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Detected CPU feature miss on $MISSING matrix cell(s)."
+          echo "Detected CPU feature miss on platforms: $MISSING_PLATFORMS"
+          echo "missing_platforms=$MISSING_PLATFORMS" >> "$GITHUB_OUTPUT"
           # Cap concurrent in-flight smoke-test runs to prevent runaway re-dispatch.
           # --repo is required because this job is not in a git checkout context.
           INFLIGHT=$(gh run list --repo "${{ github.repository }}" \
@@ -554,13 +579,12 @@ jobs:
         if: steps.check.outputs.should_dispatch == 'true'
         run: |
           NATIVE_VERSION="${{ github.event.inputs.nativeVersion }}"
+          ARGS=(-f "platforms=${{ steps.check.outputs.missing_platforms }}")
           if [ -n "$NATIVE_VERSION" ]; then
-            gh workflow run --repo "${{ github.repository }}" smoke-test.yml \
-              -f nativeVersion="$NATIVE_VERSION"
-          else
-            gh workflow run --repo "${{ github.repository }}" smoke-test.yml
+            ARGS+=(-f "nativeVersion=$NATIVE_VERSION")
           fi
-          echo "Re-dispatch triggered; a fresh workflow run will start on a new runner pool."
+          gh workflow run --repo "${{ github.repository }}" smoke-test.yml "${ARGS[@]}"
+          echo "Re-dispatch triggered for platforms: ${{ steps.check.outputs.missing_platforms }}"
 
   deploy:
     name: Deploy performance report to Pages
