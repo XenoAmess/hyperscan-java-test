@@ -52,7 +52,13 @@
 
 ## 四、进度追踪
 
-- [ ] Commit 1：merge 脚本 + report job + stale 渲染
-- [ ] 验证 1：样本目检
-- [ ] Commit 2：重试 + setup matrix + retry-dispatch 精细化
-- [ ] 验证 2：matrix 过滤模拟 + CI 观察
+- [x] Commit 1：merge 脚本 + report job + stale 渲染（`68058e2`）
+- [x] 验证 1：样本目检（merge 计数、HTML/SVG `†` 与脚注正确）
+- [x] Commit 2：重试 + setup matrix + retry-dispatch 精细化（`076c069`）
+- [x] 验证 2：matrix 过滤模拟（全量/子集/非法名）、jq 提取 mock 验证、CI 观察
+
+### 实施偏差与 CI 实证记录（2026-07-17）
+
+- 首轮新链路 run（29567087388）：AVX-512 再次 cpu-miss，merge 输出 18 current + 0 stale（上一次成功 run 同样缺该档，深度 1 无法回补）→ retry-dispatch 精准触发 workflow_dispatch run（29567545024），仅含缺失 cell ✓
+- **发现并修复误报**：retry-dispatch 的提取正则匹配到 `Run JMH benchmarks for UPSTREAM on windows-*` —— 该步骤在 Windows 上是**故意** skip（原版无 Windows 构建），被误判为 CPU miss 导致 Windows cell 被无谓重跑。修复：检测限定 `(JAVACPP|PANAMA)`（`8bf4dbf`）。Linux 上 UPSTREAM skip 与 JAVACPP/PANAMA 同源（cpu-check），不含 UPSTREAM 不会漏判。
+- 29567545024 的 AVX-512 再次抽不到机器 → 按设计不再连环重跑（仅 push 事件触发 retry），缺失格由 merge 旧数据 + `†` 标记兜底。
