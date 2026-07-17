@@ -550,11 +550,13 @@ jobs:
           # 'gh run view --log' filters out ::warning:: annotations, so we cannot
           # grep logs; the jobs API surfaces step outcomes instead. Extract the
           # affected platform names so we can re-run only the missing cells.
+          # The UPSTREAM step is skipped on Windows BY DESIGN (no upstream
+          # windows build) and must not count as a CPU miss.
           MISSING_PLATFORMS=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             --jq '[.jobs[] | .steps[]? | select(.conclusion == "skipped") | .name
-                 | select(test("^Run smoke tests for ") or test("^Run JMH benchmarks for "))
+                 | select(test("^Run smoke tests for ") or test("^Run JMH benchmarks for (JAVACPP|PANAMA) on "))
                  | if test("^Run smoke tests for ") then sub("^Run smoke tests for "; "")
-                   else sub("^Run JMH benchmarks for [A-Z]+ on "; "") end]
+                   else sub("^Run JMH benchmarks for (JAVACPP|PANAMA) on "; "") end]
                  | unique | join(",")')
           if [ -z "$MISSING_PLATFORMS" ]; then
             echo "No CPU feature miss detected in this run; not re-dispatching."
