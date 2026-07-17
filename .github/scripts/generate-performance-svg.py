@@ -65,6 +65,10 @@ def is_unsupported(result):
     return bool(safe_get(result, 'unsupported', default=False))
 
 
+def is_stale(result):
+    return bool(safe_get(result, 'stale', default=False))
+
+
 def find_benchmark(result, scenario_name):
     for bench in safe_get(result, 'benchmarks', default=[]):
         if safe_get(bench, 'name') == scenario_name:
@@ -174,6 +178,7 @@ def build_platform_rows(results, scenario_name):
             'panama': panama_value,
             'upstream': upstream_value,
             'upstream_unsupported': upstream_unsupported,
+            'stale': any(is_stale(impls.get(name)) for name in ('javacpp', 'panama', 'upstream') if impls.get(name)),
             'bestThroughput': best_tp,
             'unit': unit
         })
@@ -253,7 +258,8 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
         upstream_width = (upstream_tp / max_tp) * chart_width
 
         label_y = group_y + (bar_height * 3 + bar_gap * 2) / 2 + 4
-        svg.append(f'  <text x="{left_margin - 10}" y="{label_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="end" fill="#24292f">{escape(platform)}</text>')
+        stale_suffix = ' †' if row['stale'] else ''
+        svg.append(f'  <text x="{left_margin - 10}" y="{label_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="end" fill="#24292f">{escape(platform + stale_suffix)}</text>')
 
         svg.append(f'  <rect x="{left_margin}" y="{group_y}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
         svg.append(f'  <rect x="{left_margin}" y="{group_y + bar_height + bar_gap}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
@@ -291,7 +297,9 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
         svg.append(f'  <text x="{upstream_value_x}" y="{upstream_value_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#6a737d">{escape(upstream_value_text)}</text>')
 
     footer_y = height - 15
-    svg.append(f'  <text x="{width / 2}" y="{footer_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" text-anchor="middle" fill="#656d76">Generated {escape(generated_at)}  ·  Full report at xenoamess.github.io/hyperscan-java-test</text>')
+    has_stale = any(row['stale'] for row in rows)
+    footer_note = '  ·  † data from an earlier run' if has_stale else ''
+    svg.append(f'  <text x="{width / 2}" y="{footer_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" text-anchor="middle" fill="#656d76">Generated {escape(generated_at)}{escape(footer_note)}  ·  Full report at xenoamess.github.io/hyperscan-java-test</text>')
 
     svg.append('</svg>')
 

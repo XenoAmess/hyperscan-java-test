@@ -87,6 +87,18 @@ def is_unsupported(result):
     return bool(safe_get(result, 'unsupported', default=False))
 
 
+def is_stale(result):
+    return bool(safe_get(result, 'stale', default=False))
+
+
+def stale_mark(flag):
+    return '<sup title="data from an earlier run">†</sup>' if flag else ''
+
+
+def stale_note_for(result):
+    return safe_get(result, 'timestamp', default=None) or 'earlier run'
+
+
 def scenario_names(results):
     names = set()
     for r in results:
@@ -193,6 +205,9 @@ def build_platform_summary(results, scenario_name):
             'panamaThroughput': panama_tp,
             'upstreamThroughput': upstream_tp,
             'upstreamUnsupported': upstream_unsupported,
+            'javacppStale': is_stale(javacpp) if javacpp else False,
+            'panamaStale': is_stale(panama) if panama else False,
+            'upstreamStale': is_stale(upstream) if upstream else False,
             'bestImplementation': best_impl,
             'bestThroughput': best_tp,
             'results': list(impls.values())
@@ -218,6 +233,7 @@ def build_scenario_rows(results, scenario_name):
             'platform': platform,
             'implementation': impl,
             'unsupported': is_unsupported(r),
+            'stale': is_stale(r),
             'runner_os': runner_os,
             'runner_arch': runner_arch,
             'cpu_display': cpu_display,
@@ -484,7 +500,7 @@ def generate_html(results, output_file, native_version, commit_sha):
         speedup = f'{format_num(available[0] / available[1], 2)}x' if len(available) >= 2 else ''
 
         upstream_cell = ('<span style="color:#6a737d;">unsupported</span>' if row['upstreamUnsupported']
-                         else escape(format_num(upstream_tp)) if row['upstream'] else '-')
+                         else escape(format_num(upstream_tp)) + stale_mark(row['upstreamStale']) if row['upstream'] else '-')
 
         cls = 'best' if best and row['bestThroughput'] == best['throughput'] else ''
         html.append(f'      <tr class="{cls}">')
@@ -492,13 +508,23 @@ def generate_html(results, output_file, native_version, commit_sha):
         html.append(f'        <td>{escape(platform)}</td>')
         html.append(f'        <td>{escape(runner_os)} / {escape(runner_arch)}</td>')
         html.append(f'        <td title="{escape(cpu_flags)}">{escape(cpu_display[:60])}</td>')
-        html.append(f'        <td>{escape(format_num(javacpp_tp))}</td>')
-        html.append(f'        <td>{escape(format_num(panama_tp))}</td>')
+        html.append(f'        <td>{escape(format_num(javacpp_tp))}{stale_mark(row["javacppStale"])}</td>')
+        html.append(f'        <td>{escape(format_num(panama_tp))}{stale_mark(row["panamaStale"])}</td>')
         html.append(f'        <td>{upstream_cell}</td>')
         html.append(f'        <td>{escape(faster)}</td>')
         html.append(f'        <td>{escape(speedup)}</td>')
         html.append('      </tr>')
     html.append('    </table>')
+
+    stale_cells = []
+    for row in platform_rows:
+        for impl_name, flag, res in (('javacpp', row['javacppStale'], row['javacpp']),
+                                     ('panama', row['panamaStale'], row['panama']),
+                                     ('upstream', row['upstreamStale'], row['upstream'])):
+            if flag and res:
+                stale_cells.append(f"{row['platform']} / {impl_name} ({stale_note_for(res)})")
+    if stale_cells:
+        html.append(f'    <p style="font-size: 0.85rem; color: #6a737d;">† data from an earlier run: {escape("; ".join(stale_cells))}</p>')
 
     # Throughput chart
     html.append('    <h2>Throughput Comparison</h2>')
@@ -569,7 +595,7 @@ def generate_html(results, output_file, native_version, commit_sha):
                 html.append(f'        <td>{escape(srow["implementation"])}</td>')
                 html.append(f'        <td colspan="6" style="color:#6a737d;">unsupported</td>')
             else:
-                html.append(f'        <td>{escape(srow["implementation"])}</td>')
+                html.append(f'        <td>{escape(srow["implementation"])}{stale_mark(srow["stale"])}</td>')
                 html.append(f'        <td>{escape(format_num(srow["iterations"], 0))}</td>')
                 html.append(f'        <td>{escape(format_num(srow["elapsed"]))}</td>')
                 html.append(f'        <td>{escape(format_num(srow["throughput"]))}</td>')
@@ -607,10 +633,11 @@ def generate_html(results, output_file, native_version, commit_sha):
             elapsed = elapsed_for(r, fixed_scenario)
             matches = matches_for(r, fixed_scenario)
             fastest = row['bestImplementation'] == impl_name
+            impl_stale = bool(row.get(impl_name + 'Stale'))
             cls = 'best' if fastest else ''
             badge = ' <span class="impl-badge fastest">fastest</span>' if fastest else ''
             html.append(f'        <tr class="{cls}">')
-            html.append(f'          <td><span class="impl-name">{escape(impl_name)}</span>{badge}</td>')
+            html.append(f'          <td><span class="impl-name">{escape(impl_name)}</span>{stale_mark(impl_stale)}{badge}</td>')
             html.append(f'          <td>{escape(format_num(tp))}</td>')
             html.append(f'          <td>{escape(format_num(elapsed))}</td>')
             html.append(f'          <td>{escape(str(matches))}</td>')

@@ -381,7 +381,10 @@ jobs:
     name: Aggregate performance report
     needs: [smoke, benchmark]
     runs-on: ubuntu-24.04
-    if: always() && !cancelled() && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')) && needs.smoke.result == 'success' && needs.benchmark.result == 'success'
+    # smoke gates functional correctness; benchmark cells may flake or skip on
+    # missing CPU features, in which case the merge below backfills them with
+    # the previous successful run's data (marked stale).
+    if: always() && !cancelled() && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')) && (needs.smoke.result == 'success' || needs.smoke.result == 'skipped')
     env:
       GITHUB_SHA: ${{ github.sha }}
     steps:
@@ -405,10 +408,29 @@ jobs:
           path: benchmark-raw
           pattern: benchmark-raw-*
 
+      - name: Download previous successful run's benchmark raw results
+        uses: dawidd6/action-download-artifact@v21
+        continue-on-error: true
+        with:
+          workflow: smoke-test.yml
+          branch: ${{ github.ref_name }}
+          workflow_conclusion: success
+          name: benchmark-raw-.*
+          name_is_regexp: true
+          path: benchmark-raw-previous
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge with previous run results
+        run: |
+          python3 .github/scripts/merge-benchmark-results.py \
+            benchmark-raw \
+            benchmark-raw-previous \
+            benchmark-raw-merged
+
       - name: Generate performance report
         run: |
           python3 .github/scripts/generate-performance-report.py \
-            benchmark-raw \
+            benchmark-raw-merged \
             target/performance-report/index.html \
             "${NATIVE_VERSION}" \
             "${GITHUB_SHA}"
@@ -416,7 +438,7 @@ jobs:
       - name: Generate performance summary SVG
         run: |
           python3 .github/scripts/generate-performance-svg.py \
-            benchmark-raw \
+            benchmark-raw-merged \
             target/performance-report/performance-summary.svg \
             "${NATIVE_VERSION}" \
             "${GITHUB_SHA}"
@@ -424,7 +446,7 @@ jobs:
       - name: Generate per-scenario SVGs
         run: |
           python3 .github/scripts/generate-performance-svg.py \
-            benchmark-raw \
+            benchmark-raw-merged \
             target/performance-report/scenarios/ \
             "${NATIVE_VERSION}" \
             "${GITHUB_SHA}"
