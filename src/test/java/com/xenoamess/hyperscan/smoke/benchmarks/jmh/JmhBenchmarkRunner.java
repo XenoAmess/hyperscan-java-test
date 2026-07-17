@@ -39,6 +39,10 @@ public class JmhBenchmarkRunner {
         jvmArgs.add("-Dhyperscan.benchmark.implementation=" + IMPLEMENTATION);
         if (!javacppPlatform.isEmpty()) {
             jvmArgs.add("-Djavacpp.platform=" + javacppPlatform);
+            // HyperscanNativeLoader reads org.bytedeco.javacpp.platform, not
+            // javacpp.platform; without it the forked JVM may auto-detect the
+            // bare platform and load the AVX-512 lib on non-AVX-512 hosts.
+            jvmArgs.add("-Dorg.bytedeco.javacpp.platform=" + javacppPlatform);
         }
         if (!panamaPlatform.isEmpty()) {
             jvmArgs.add("-Dcom.xenoamess.hyperscan_panama.platform=" + panamaPlatform);
