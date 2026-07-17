@@ -63,3 +63,15 @@
 - **发现并修复误报**：retry-dispatch 的提取正则匹配到 `Run JMH benchmarks for UPSTREAM on windows-*` —— 该步骤在 Windows 上是**故意** skip（原版无 Windows 构建），被误判为 CPU miss 导致 Windows cell 被无谓重跑。修复：检测限定 `(JAVACPP|PANAMA)`（`8bf4dbf`）。Linux 上 UPSTREAM skip 与 JAVACPP/PANAMA 同源（cpu-check），不含 UPSTREAM 不会漏判。
 - **深度 1 不足**：实测 AVX-512 连续 4 轮 cpu-miss，最近成功 run 同样缺档 → 追加多级回收：report job 从最近 5 个成功 run 的 benchmark-raw 回收缺失格（取最新副本，打 stale）（`1251b95`）。
 - **端到端闭环验证**：精准重跑（29569434328，子集 linux-x86_64）最终命中 AVX-512 机器产出新鲜数据；其余 cell 由最近成功 run 回收（stale 带时间戳）——线上报告 7 档完整，新鲜度如实标注。
+
+## 五、追加事故：报告 0.00 空洞与 libhs SIGILL（2026-07-17 下午）
+
+用户复查发现报告仍有大量 0.00 缺失条目，深挖出三层叠加问题：
+
+1. **空结果污染**：个别 run 的 JAVACPP JMH 步骤"成功"但写出 `benchmarks:[]`（JMH forked JVM 崩溃后静默返回空）。merge 的空值守卫（跳过空结果）+ `JmhBenchmarkRunner` 空结果即抛错（`948a800`）。
+2. **backfill 顺序 bug**：report job 用 `ls -d benchmark-raw-prev-*` 重建目录列表，字母序破坏了 recency 顺序，导致回收了**最旧**（恰为空的）副本而非最新健康副本。改为按 RUN_IDS 顺序累积 PREV_DIRS（`948a800`）。
+3. **根因 —— libhs SIGILL（`736389a`）**：hs_err 实锤：JMH forked JVM 加载了 `jni/linux-x86_64/libhs.so`（**AVX-512 构建**）在非 AVX-512 的 Zen3 runner 上于 `hs_compile_multi` 内 SIGILL。机制：JmhBenchmarkRunner 只转发 `-Djavacpp.platform`，而 fork loader 读的是 `org.bytedeco.javacpp.platform`；该属性缺失时裸平台被自动探测/缓存（loader 运行前），AVX-512 变体被加载。修复：同时转发 `-Dorg.bytedeco.javacpp.platform`，变体选择显式化，竞态消除。
+4. 起爆时间线：~09:00 起集中爆发，与 ubuntu-24.04 runner 镜像（20260707.563）滚动更新导致的 JVM 启动顺序变化相符；此前同一代码路径健康运行数周属侥幸。
+5. 结果：修复后 run 全绿，线上报告 7 档全为新鲜真实数据，无 0.00 无 †。
+
+诊断辅助：`ci(benchmark)` 步骤新增失败时上传 hs_err + dumpstream（`169605f`），本轮正是靠它拿到实锤。
