@@ -74,11 +74,17 @@ def implementation_for(result):
         return impl
     source = result.get('_source', '')
     lower = source.lower()
+    if 'upstream' in lower:
+        return 'upstream'
     if 'panama' in lower:
         return 'panama'
     if 'javacpp' in lower:
         return 'javacpp'
     return 'javacpp'
+
+
+def is_unsupported(result):
+    return bool(safe_get(result, 'unsupported', default=False))
 
 
 def scenario_names(results):
@@ -162,24 +168,31 @@ def build_platform_summary(results, scenario_name):
     for platform, impls in by_platform.items():
         javacpp = impls.get('javacpp')
         panama = impls.get('panama')
+        upstream = impls.get('upstream')
         javacpp_tp = throughput_for(javacpp, scenario_name) if javacpp else 0.0
         panama_tp = throughput_for(panama, scenario_name) if panama else 0.0
+        upstream_tp = throughput_for(upstream, scenario_name) if upstream else 0.0
+        upstream_unsupported = is_unsupported(upstream) if upstream else False
 
         best_impl = None
         best_tp = 0.0
-        if javacpp and javacpp_tp >= panama_tp:
-            best_impl = 'javacpp'
-            best_tp = javacpp_tp
-        elif panama:
-            best_impl = 'panama'
-            best_tp = panama_tp
+        for impl_name, tp in (('javacpp', javacpp_tp), ('panama', panama_tp)):
+            if tp > best_tp:
+                best_impl = impl_name
+                best_tp = tp
+        if upstream and not upstream_unsupported and upstream_tp > best_tp:
+            best_impl = 'upstream'
+            best_tp = upstream_tp
 
         rows.append({
             'platform': platform,
             'javacpp': javacpp,
             'panama': panama,
+            'upstream': upstream,
             'javacppThroughput': javacpp_tp,
             'panamaThroughput': panama_tp,
+            'upstreamThroughput': upstream_tp,
+            'upstreamUnsupported': upstream_unsupported,
             'bestImplementation': best_impl,
             'bestThroughput': best_tp,
             'results': list(impls.values())
@@ -204,6 +217,7 @@ def build_scenario_rows(results, scenario_name):
         rows.append({
             'platform': platform,
             'implementation': impl,
+            'unsupported': is_unsupported(r),
             'runner_os': runner_os,
             'runner_arch': runner_arch,
             'cpu_display': cpu_display,
@@ -232,22 +246,29 @@ def build_scenario_chart_rows(results, scenario_name):
     for platform, impls in by_platform.items():
         javacpp = impls.get('javacpp')
         panama = impls.get('panama')
+        upstream = impls.get('upstream')
+        upstream_unsupported = is_unsupported(upstream) if upstream else False
         javacpp_tp = throughput_for(javacpp, scenario_name) if javacpp else 0.0
         panama_tp = throughput_for(panama, scenario_name) if panama else 0.0
+        upstream_tp = throughput_for(upstream, scenario_name) if upstream and not upstream_unsupported else 0.0
         javacpp_ops = ops_per_second_for(javacpp, scenario_name) or 0.0 if javacpp else 0.0
         panama_ops = ops_per_second_for(panama, scenario_name) or 0.0 if panama else 0.0
+        upstream_ops = ops_per_second_for(upstream, scenario_name) or 0.0 if upstream and not upstream_unsupported else 0.0
 
         metric_type = None
         javacpp_value = 0.0
         panama_value = 0.0
-        if javacpp_tp > 0 or panama_tp > 0:
+        upstream_value = 0.0
+        if javacpp_tp > 0 or panama_tp > 0 or upstream_tp > 0:
             metric_type = 'throughput'
             javacpp_value = javacpp_tp
             panama_value = panama_tp
-        elif javacpp_ops > 0 or panama_ops > 0:
+            upstream_value = upstream_tp
+        elif javacpp_ops > 0 or panama_ops > 0 or upstream_ops > 0:
             metric_type = 'ops'
             javacpp_value = javacpp_ops
             panama_value = panama_ops
+            upstream_value = upstream_ops
 
         if metric_type is None:
             continue
@@ -256,6 +277,8 @@ def build_scenario_chart_rows(results, scenario_name):
             'platform': platform,
             'javacpp': javacpp_value,
             'panama': panama_value,
+            'upstream': upstream_value,
+            'upstream_unsupported': upstream_unsupported,
             'metric_type': metric_type
         })
 
@@ -266,7 +289,7 @@ def build_scenario_chart_rows(results, scenario_name):
 def render_scenario_chart(html, rows, scenario_name, svg_link=None):
     if not rows:
         return
-    max_value = max(max(r['javacpp'], r['panama']) for r in rows)
+    max_value = max(max(r['javacpp'], r['panama'], r['upstream']) for r in rows)
     if max_value <= 0:
         return
 
@@ -281,6 +304,7 @@ def render_scenario_chart(html, rows, scenario_name, svg_link=None):
     for row in rows:
         javacpp_width = row['javacpp'] / max_value * 100 if max_value > 0 else 0
         panama_width = row['panama'] / max_value * 100 if max_value > 0 else 0
+        upstream_width = row['upstream'] / max_value * 100 if max_value > 0 else 0
 
         html.append('    <div style="margin-bottom: 0.75rem;">')
         html.append(f'      <div style="margin-bottom: 0.25rem; font-size: 0.9rem;">{escape(row["platform"])}</div>')
@@ -291,12 +315,22 @@ def render_scenario_chart(html, rows, scenario_name, svg_link=None):
         html.append('        </div>')
         html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["javacpp"]))} {unit}</div>')
         html.append('      </div>')
-        html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem;">')
+        html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">')
         html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">Panama</div>')
         html.append('        <div class="bar-bg" style="flex: 1;">')
         html.append(f'          <div class="bar-fill" style="width: {panama_width:.1f}%; background: #0969da;"></div>')
         html.append('        </div>')
         html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["panama"]))} {unit}</div>')
+        html.append('      </div>')
+        html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem;">')
+        html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">Upstream</div>')
+        if row['upstream_unsupported']:
+            html.append('        <div style="flex: 1; font-size: 0.85rem; color: #6a737d;">unsupported</div>')
+        else:
+            html.append('        <div class="bar-bg" style="flex: 1;">')
+            html.append(f'          <div class="bar-fill" style="width: {upstream_width:.1f}%; background: #6a737d;"></div>')
+            html.append('        </div>')
+            html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["upstream"]))} {unit}</div>')
         html.append('      </div>')
         html.append('    </div>')
 
@@ -312,6 +346,8 @@ def generate_html(results, output_file, native_version, commit_sha):
             all_impls.append({'platform': row['platform'], 'implementation': 'javacpp', 'throughput': row['javacppThroughput']})
         if row['panama']:
             all_impls.append({'platform': row['platform'], 'implementation': 'panama', 'throughput': row['panamaThroughput']})
+        if row['upstream'] and not row['upstreamUnsupported'] and row['upstreamThroughput'] > 0:
+            all_impls.append({'platform': row['platform'], 'implementation': 'upstream', 'throughput': row['upstreamThroughput']})
     all_impls.sort(key=lambda x: x['throughput'], reverse=True)
 
     best = all_impls[0] if all_impls else None
@@ -424,6 +460,7 @@ def generate_html(results, output_file, native_version, commit_sha):
     html.append('        <th>CPU</th>')
     html.append('        <th>JavaCPP (MB/s)</th>')
     html.append('        <th>Panama (MB/s)</th>')
+    html.append('        <th>Upstream (MB/s)</th>')
     html.append('        <th>Faster</th>')
     html.append('        <th>Speedup</th>')
     html.append('      </tr>')
@@ -440,14 +477,14 @@ def generate_html(results, output_file, native_version, commit_sha):
 
         javacpp_tp = row['javacppThroughput']
         panama_tp = row['panamaThroughput']
+        upstream_tp = row['upstreamThroughput']
         faster = row['bestImplementation'] or '-'
 
-        speedup = ''
-        if javacpp_tp > 0 and panama_tp > 0:
-            if javacpp_tp >= panama_tp:
-                speedup = f'{format_num(javacpp_tp / panama_tp, 2)}x'
-            else:
-                speedup = f'{format_num(panama_tp / javacpp_tp, 2)}x'
+        available = sorted([tp for tp in (javacpp_tp, panama_tp, upstream_tp) if tp > 0], reverse=True)
+        speedup = f'{format_num(available[0] / available[1], 2)}x' if len(available) >= 2 else ''
+
+        upstream_cell = ('<span style="color:#6a737d;">unsupported</span>' if row['upstreamUnsupported']
+                         else escape(format_num(upstream_tp)) if row['upstream'] else '-')
 
         cls = 'best' if best and row['bestThroughput'] == best['throughput'] else ''
         html.append(f'      <tr class="{cls}">')
@@ -457,6 +494,7 @@ def generate_html(results, output_file, native_version, commit_sha):
         html.append(f'        <td title="{escape(cpu_flags)}">{escape(cpu_display[:60])}</td>')
         html.append(f'        <td>{escape(format_num(javacpp_tp))}</td>')
         html.append(f'        <td>{escape(format_num(panama_tp))}</td>')
+        html.append(f'        <td>{upstream_cell}</td>')
         html.append(f'        <td>{escape(faster)}</td>')
         html.append(f'        <td>{escape(speedup)}</td>')
         html.append('      </tr>')
@@ -471,6 +509,7 @@ def generate_html(results, output_file, native_version, commit_sha):
             html.append(f'      <div style="margin-bottom: 0.25rem; font-size: 0.9rem;">{escape(row["platform"])}</div>')
             javacpp_width = row['javacppThroughput'] / max_tp * 100 if max_tp > 0 else 0
             panama_width = row['panamaThroughput'] / max_tp * 100 if max_tp > 0 else 0
+            upstream_width = row['upstreamThroughput'] / max_tp * 100 if max_tp > 0 else 0
             html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">')
             html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">JavaCPP</div>')
             html.append('        <div class="bar-bg" style="flex: 1;">')
@@ -478,12 +517,24 @@ def generate_html(results, output_file, native_version, commit_sha):
             html.append('        </div>')
             html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["javacppThroughput"]))} MB/s</div>')
             html.append('      </div>')
-            html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem;">')
+            html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">')
             html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">Panama</div>')
             html.append('        <div class="bar-bg" style="flex: 1;">')
             html.append(f'          <div class="bar-fill" style="width: {panama_width:.1f}%; background: #0969da;"></div>')
             html.append('        </div>')
             html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["panamaThroughput"]))} MB/s</div>')
+            html.append('      </div>')
+            html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem;">')
+            html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">Upstream</div>')
+            if row['upstreamUnsupported']:
+                html.append('        <div style="flex: 1; font-size: 0.85rem; color: #6a737d;">unsupported</div>')
+            elif row['upstream']:
+                html.append('        <div class="bar-bg" style="flex: 1;">')
+                html.append(f'          <div class="bar-fill" style="width: {upstream_width:.1f}%; background: #6a737d;"></div>')
+                html.append('        </div>')
+                html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["upstreamThroughput"]))} MB/s</div>')
+            else:
+                html.append('        <div style="flex: 1; font-size: 0.85rem; color: #6a737d;">-</div>')
             html.append('      </div>')
             html.append('    </div>')
 
@@ -514,13 +565,17 @@ def generate_html(results, output_file, native_version, commit_sha):
             html.append(f'        <td>{escape(srow["platform"])}</td>')
             html.append(f'        <td>{escape(srow["runner_os"])} / {escape(srow["runner_arch"])}</td>')
             html.append(f'        <td title="{escape(srow["cpu_flags"])}">{escape(srow["cpu_display"][:60])}</td>')
-            html.append(f'        <td>{escape(srow["implementation"])}</td>')
-            html.append(f'        <td>{escape(format_num(srow["iterations"], 0))}</td>')
-            html.append(f'        <td>{escape(format_num(srow["elapsed"]))}</td>')
-            html.append(f'        <td>{escape(format_num(srow["throughput"]))}</td>')
-            html.append(f'        <td>{escape(format_num(srow["ops_per_second"]))}</td>')
-            html.append(f'        <td>{escape(format_num(srow["ns_per_op"]))}</td>')
-            html.append(f'        <td>{escape(format_num(srow["total_matches"], 0))}</td>')
+            if srow['unsupported']:
+                html.append(f'        <td>{escape(srow["implementation"])}</td>')
+                html.append(f'        <td colspan="6" style="color:#6a737d;">unsupported</td>')
+            else:
+                html.append(f'        <td>{escape(srow["implementation"])}</td>')
+                html.append(f'        <td>{escape(format_num(srow["iterations"], 0))}</td>')
+                html.append(f'        <td>{escape(format_num(srow["elapsed"]))}</td>')
+                html.append(f'        <td>{escape(format_num(srow["throughput"]))}</td>')
+                html.append(f'        <td>{escape(format_num(srow["ops_per_second"]))}</td>')
+                html.append(f'        <td>{escape(format_num(srow["ns_per_op"]))}</td>')
+                html.append(f'        <td>{escape(format_num(srow["total_matches"], 0))}</td>')
             html.append('      </tr>')
         html.append('    </table>')
 
@@ -537,9 +592,16 @@ def generate_html(results, output_file, native_version, commit_sha):
         html.append('          <th>Elapsed (ms)</th>')
         html.append('          <th>Matches</th>')
         html.append('        </tr>')
-        for impl_name in ['javacpp', 'panama']:
-            r = row['javacpp'] if impl_name == 'javacpp' else row['panama']
+        for impl_name in ['javacpp', 'panama', 'upstream']:
+            r = row[impl_name] if impl_name in row else None
             if not r:
+                continue
+            if impl_name == 'upstream' and row['upstreamUnsupported']:
+                reason = safe_get(r, 'reason', default='no native build for this platform')
+                html.append(f'        <tr>')
+                html.append(f'          <td><span class="impl-name">upstream</span></td>')
+                html.append(f'          <td colspan="3" style="color:#6a737d;">unsupported — {escape(reason)}</td>')
+                html.append('        </tr>')
                 continue
             tp = throughput_for(r, fixed_scenario)
             elapsed = elapsed_for(r, fixed_scenario)

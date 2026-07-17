@@ -16,6 +16,7 @@ across supported platforms and instruction-set tiers.
 - Synthetic data: many random literal patterns, character classes, long inputs
 - Real-world data: HTTP request/response parsing, nginx logs, simple security signatures
 - JMH benchmarks (compile/scan scenarios, multi-GB large scans, instruction-set granularity) on every supported ISA tier
+- Three-way benchmark comparison: fork native (JavaCPP), Panama, and upstream `com.gliwka.hyperscan:native` (`upstream`). Upstream has no ISA-tier builds and no `windows-x86_64` classifier — Windows rows report `unsupported`
 
 ## Supported platforms
 

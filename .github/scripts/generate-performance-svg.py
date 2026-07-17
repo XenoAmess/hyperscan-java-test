@@ -52,11 +52,17 @@ def implementation_for(result):
         return impl
     source = result.get('_source', '')
     lower = source.lower()
+    if 'upstream' in lower:
+        return 'upstream'
     if 'panama' in lower:
         return 'panama'
     if 'javacpp' in lower:
         return 'javacpp'
     return 'javacpp'
+
+
+def is_unsupported(result):
+    return bool(safe_get(result, 'unsupported', default=False))
 
 
 def find_benchmark(result, scenario_name):
@@ -150,17 +156,24 @@ def build_platform_rows(results, scenario_name):
     rows = []
     unit = 'MB/s'
     for platform, impls in by_platform.items():
+        upstream = impls.get('upstream')
+        upstream_unsupported = is_unsupported(upstream) if upstream else False
         javacpp_value, javacpp_unit = value_for(impls.get('javacpp'), scenario_name) if impls.get('javacpp') else (0.0, 'MB/s')
         panama_value, panama_unit = value_for(impls.get('panama'), scenario_name) if impls.get('panama') else (0.0, 'MB/s')
+        upstream_value, upstream_unit = value_for(upstream, scenario_name) if upstream and not upstream_unsupported else (0.0, 'MB/s')
         if javacpp_value > 0:
             unit = javacpp_unit
         elif panama_value > 0:
             unit = panama_unit
-        best_tp = max(javacpp_value, panama_value)
+        elif upstream_value > 0:
+            unit = upstream_unit
+        best_tp = max(javacpp_value, panama_value, upstream_value)
         rows.append({
             'platform': platform,
             'javacpp': javacpp_value,
             'panama': panama_value,
+            'upstream': upstream_value,
+            'upstream_unsupported': upstream_unsupported,
             'bestThroughput': best_tp,
             'unit': unit
         })
@@ -187,7 +200,7 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
     bar_height = 20
     bar_gap = 5
     group_gap = 18
-    chart_height = len(rows) * (bar_height * 2 + bar_gap + group_gap) + group_gap
+    chart_height = len(rows) * (bar_height * 3 + bar_gap * 2 + group_gap) + group_gap
     height = top_margin + chart_height + bottom_margin
 
     generated_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
@@ -206,6 +219,10 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
     svg.append('      <stop offset="0%" style="stop-color:#0969da;stop-opacity:1" />')
     svg.append('      <stop offset="100%" style="stop-color:#54aeff;stop-opacity:1" />')
     svg.append('    </linearGradient>')
+    svg.append('    <linearGradient id="upstreamGradient" x1="0%" y1="0%" x2="100%" y2="0%">')
+    svg.append('      <stop offset="0%" style="stop-color:#6a737d;stop-opacity:1" />')
+    svg.append('      <stop offset="100%" style="stop-color:#959da5;stop-opacity:1" />')
+    svg.append('    </linearGradient>')
     svg.append('  </defs>')
 
     svg.append(f'  <rect width="{width}" height="{height}" fill="#f6f8fa" rx="6" />')
@@ -220,27 +237,34 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
     svg.append(f'  <text x="{legend_x + 18}" y="{legend_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#24292f">JavaCPP</text>')
     svg.append(f'  <rect x="{legend_x + 75}" y="{legend_y - 10}" width="12" height="12" fill="url(#panamaGradient)" rx="2" />')
     svg.append(f'  <text x="{legend_x + 93}" y="{legend_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#24292f">Panama</text>')
+    svg.append(f'  <rect x="{legend_x + 155}" y="{legend_y - 10}" width="12" height="12" fill="url(#upstreamGradient)" rx="2" />')
+    svg.append(f'  <text x="{legend_x + 173}" y="{legend_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#24292f">Upstream</text>')
 
     chart_width = width - left_margin - right_margin
 
     for idx, row in enumerate(rows):
-        group_y = top_margin + group_gap + idx * (bar_height * 2 + bar_gap + group_gap)
+        group_y = top_margin + group_gap + idx * (bar_height * 3 + bar_gap * 2 + group_gap)
         platform = row['platform']
         javacpp_tp = row['javacpp']
         panama_tp = row['panama']
+        upstream_tp = row['upstream']
         javacpp_width = (javacpp_tp / max_tp) * chart_width
         panama_width = (panama_tp / max_tp) * chart_width
+        upstream_width = (upstream_tp / max_tp) * chart_width
 
-        label_y = group_y + (bar_height * 2 + bar_gap) / 2 + 4
+        label_y = group_y + (bar_height * 3 + bar_gap * 2) / 2 + 4
         svg.append(f'  <text x="{left_margin - 10}" y="{label_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="end" fill="#24292f">{escape(platform)}</text>')
 
         svg.append(f'  <rect x="{left_margin}" y="{group_y}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
         svg.append(f'  <rect x="{left_margin}" y="{group_y + bar_height + bar_gap}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
+        svg.append(f'  <rect x="{left_margin}" y="{group_y + (bar_height + bar_gap) * 2}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
 
         if javacpp_width > 0:
             svg.append(f'  <rect x="{left_margin}" y="{group_y}" width="{javacpp_width:.1f}" height="{bar_height}" fill="url(#javacppGradient)" rx="4" />')
         if panama_width > 0:
             svg.append(f'  <rect x="{left_margin}" y="{group_y + bar_height + bar_gap}" width="{panama_width:.1f}" height="{bar_height}" fill="url(#panamaGradient)" rx="4" />')
+        if upstream_width > 0:
+            svg.append(f'  <rect x="{left_margin}" y="{group_y + (bar_height + bar_gap) * 2}" width="{upstream_width:.1f}" height="{bar_height}" fill="url(#upstreamGradient)" rx="4" />')
 
         javacpp_value_y = group_y + bar_height / 2 + 4
         javacpp_value_text = f'{format_num(javacpp_tp)} {unit}'
@@ -255,6 +279,16 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
         if panama_width + 85 > chart_width:
             panama_value_x = left_margin + chart_width + 6
         svg.append(f'  <text x="{panama_value_x}" y="{panama_value_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0969da">{escape(panama_value_text)}</text>')
+
+        upstream_value_y = group_y + (bar_height + bar_gap) * 2 + bar_height / 2 + 4
+        if row['upstream_unsupported']:
+            upstream_value_text = 'unsupported'
+        else:
+            upstream_value_text = f'{format_num(upstream_tp)} {unit}'
+        upstream_value_x = left_margin + min(upstream_width, chart_width) + 6
+        if upstream_width + 85 > chart_width:
+            upstream_value_x = left_margin + chart_width + 6
+        svg.append(f'  <text x="{upstream_value_x}" y="{upstream_value_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#6a737d">{escape(upstream_value_text)}</text>')
 
     footer_y = height - 15
     svg.append(f'  <text x="{width / 2}" y="{footer_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" text-anchor="middle" fill="#656d76">Generated {escape(generated_at)}  ·  Full report at xenoamess.github.io/hyperscan-java-test</text>')
