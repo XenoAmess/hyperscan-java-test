@@ -96,7 +96,15 @@ def stale_mark(flag):
 
 
 def stale_note_for(result):
-    return safe_get(result, 'timestamp', default=None) or 'earlier run'
+    ts = safe_get(result, 'timestamp', default=None) or 'earlier run'
+    version = safe_get(result, 'artifactVersion', default=None)
+    commit = safe_get(result, 'commitSha', default=None)
+    parts = [str(ts)]
+    if version:
+        parts.append(str(version))
+    if commit:
+        parts.append('commit ' + str(commit)[:7])
+    return ' · '.join(parts)
 
 
 def scenario_names(results):
@@ -666,7 +674,13 @@ def generate_html(results, output_file, native_version, commit_sha):
     for r in results:
         platform = safe_get(r, 'platform', default='unknown')
         impl = implementation_for(r)
-        html.append(f'      <li>{escape(platform)} / {escape(impl)}</li>')
+        detail = f'{platform} / {impl}'
+        version = safe_get(r, 'artifactVersion', default=None)
+        timestamp = safe_get(r, 'timestamp', default=None)
+        extras = [str(x) for x in (version, timestamp) if x]
+        if extras:
+            detail += ' — ' + ' — '.join(extras)
+        html.append(f'      <li>{escape(detail)}</li>')
     html.append('    </ul>')
 
     html.append('  </div>')

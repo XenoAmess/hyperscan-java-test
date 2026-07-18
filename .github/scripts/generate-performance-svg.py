@@ -172,13 +172,19 @@ def build_platform_rows(results, scenario_name):
         elif upstream_value > 0:
             unit = upstream_unit
         best_tp = max(javacpp_value, panama_value, upstream_value)
+        stale_ts = None
+        for impl_name in ('javacpp', 'panama', 'upstream'):
+            r = impls.get(impl_name)
+            if r and is_stale(r):
+                stale_ts = safe_get(r, 'timestamp', default=None) or stale_ts
         rows.append({
             'platform': platform,
             'javacpp': javacpp_value,
             'panama': panama_value,
             'upstream': upstream_value,
             'upstream_unsupported': upstream_unsupported,
-            'stale': any(is_stale(impls.get(name)) for name in ('javacpp', 'panama', 'upstream') if impls.get(name)),
+            'stale': stale_ts is not None or any(is_stale(impls.get(name)) for name in ('javacpp', 'panama', 'upstream') if impls.get(name)),
+            'stale_timestamp': stale_ts,
             'bestThroughput': best_tp,
             'unit': unit
         })
@@ -258,7 +264,12 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
         upstream_width = (upstream_tp / max_tp) * chart_width
 
         label_y = group_y + (bar_height * 3 + bar_gap * 2) / 2 + 4
-        stale_suffix = ' †' if row['stale'] else ''
+        stale_suffix = ''
+        if row['stale']:
+            stale_suffix = ' †'
+            ts = row.get('stale_timestamp')
+            if isinstance(ts, str) and len(ts) >= 10:
+                stale_suffix += ts[5:10]
         svg.append(f'  <text x="{left_margin - 10}" y="{label_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="end" fill="#24292f">{escape(platform + stale_suffix)}</text>')
 
         svg.append(f'  <rect x="{left_margin}" y="{group_y}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
