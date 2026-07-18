@@ -82,3 +82,11 @@
 
 - `d11ab67` `feat(benchmarks)`：`BenchmarkRecorder` 新增 `artifactVersion` 字段；`JmhBenchmarkRunner` 按实现从 jar 内 `META-INF/maven/<groupId>/<artifactId>/pom.properties` 解析版本（注意 jar 内是**点分** groupId，非仓库斜杠布局——首版误用斜杠导致 unknown，已修正并记录）。
 - `d665d7d` `feat(report)`：stale 脚注升级为 `platform / impl (timestamp · artifactVersion · commit sha)`；Raw Data 节每条列出 artifactVersion + timestamp（新旧格式一视同仁）；SVG stale 行平台名追加 `†MM-DD` 短日期。旧格式（无 artifactVersion）降级为仅时间戳，不炸。
+
+## 七、追加事故：报告全是陈旧标记（2026-07-18）
+
+用户发现报告突然全是 †。根因：连续 3 个精准重跑（子集 run）的 AVX-512 cell 全部再次 cpu-miss，每个子集 run 都产出"0 新鲜 + 全 backfill"的报告并**覆盖**了此前健康的报告；同时 AVX-512 连续 5+ 轮缺席导致 depth-5 回收也失效（整行消失）。修复：
+
+- `aa854da` `ci(report)`：report job 统计当次新鲜 benchmark JSON 数；为 0 时**不发布**（生成/上传/Pages 部署全部跳过，线上保留上一份健康报告），回收深度 5 → 10。
+- `d9f0db2` `ci(report)`：修复上一提交自身引入的回归——全部 cell 缺席时 benchmark-raw 目录不存在，`find` 在 errexit 下炸掉整个 report job；加目录存在性判断。
+- 验证：修复轮发布，线上报告 7 档全部新鲜值、0 个 †。
