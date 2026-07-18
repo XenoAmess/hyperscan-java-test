@@ -95,7 +95,30 @@ public class JmhBenchmarkRunner {
                 impl.toString(),
                 benchmarkResults
         );
+        recorder.setArtifactVersion(artifactVersionFor(impl));
         recorder.write();
+    }
+
+    private static String artifactVersionFor(DualImplementation impl) {
+        return switch (impl) {
+            case JAVACPP -> readArtifactVersion("com.xenoamess.hyperscan", "native");
+            case PANAMA -> readArtifactVersion("com.xenoamess.hyperscan_panama", "hyperscan-java-panama-native");
+            case UPSTREAM -> readArtifactVersion("com.gliwka.hyperscan", "native");
+        };
+    }
+
+    private static String readArtifactVersion(String groupId, String artifactId) {
+        String resource = "/META-INF/maven/" + groupId + "/" + artifactId + "/pom.properties";
+        try (java.io.InputStream in = JmhBenchmarkRunner.class.getResourceAsStream(resource)) {
+            if (in == null) {
+                return "unknown";
+            }
+            java.util.Properties props = new java.util.Properties();
+            props.load(in);
+            return props.getProperty("version", "unknown");
+        } catch (Exception e) {
+            return "unknown";
+        }
     }
 
     private static void addProfilers(ChainedOptionsBuilder builder) {

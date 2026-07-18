@@ -23,6 +23,7 @@ public class BenchmarkRecorder {
     private final String outputFile;
     private final String timestamp;
     private final List<BenchmarkResult> benchmarks;
+    private String artifactVersion;
 
     public BenchmarkRecorder(String platform, String nativeVersion, String commitSha,
                              String runnerOs, String runnerArch, String cpuModel,
@@ -47,6 +48,14 @@ public class BenchmarkRecorder {
         this.outputFile = System.getProperty("benchmark.output.file", defaultFile);
         this.timestamp = Instant.now().toString();
         this.benchmarks = benchmarks;
+    }
+
+    /**
+     * Sets the Maven artifact version of the native implementation under test
+     * (e.g. 5.4.12-2.0.4-x10), written as "artifactVersion" when non-null.
+     */
+    public void setArtifactVersion(String artifactVersion) {
+        this.artifactVersion = artifactVersion;
     }
 
     public void write() throws Exception {
@@ -74,6 +83,9 @@ public class BenchmarkRecorder {
         sb.append("  \"cpuFlags\": ").append(jsonString(cpuFlags)).append(",\n");
         if (implementation != null) {
             sb.append("  \"implementation\": ").append(jsonString(implementation)).append(",\n");
+        }
+        if (artifactVersion != null) {
+            sb.append("  \"artifactVersion\": ").append(jsonString(artifactVersion)).append(",\n");
         }
         sb.append("  \"timestamp\": ").append(jsonString(timestamp)).append(",\n");
         sb.append("  \"benchmarks\": [\n");
