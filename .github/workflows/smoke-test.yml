@@ -412,6 +412,8 @@ jobs:
     name: Aggregate performance report
     needs: [smoke, benchmark]
     runs-on: ubuntu-24.04
+    outputs:
+      fresh: ${{ steps.merge.outputs.count }}
     # smoke gates functional correctness; benchmark cells may flake or skip on
     # missing CPU features, in which case the merge below backfills them with
     # the previous successful run's data (marked stale).
@@ -440,17 +442,18 @@ jobs:
           pattern: benchmark-raw-*
 
       - name: Download previous successful runs' benchmark raw results
+        id: merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -uo pipefail
-          # Backfill cells missing from this run with data from up to the 5 most
+          # Backfill cells missing from this run with data from up to the 10 most
           # recent successful runs of this workflow (recency order). AVX-512 and
           # SVE2 runners are scarce enough that several consecutive runs can miss
-          # the same cell, so depth 1 is not sufficient.
+          # the same cell, so a small depth is not sufficient.
           RUN_IDS=$(gh api "repos/${{ github.repository }}/actions/workflows/smoke-test.yml/runs?per_page=30" \
-            --jq '[.workflow_runs[] | select(.conclusion == "success" and .id != ${{ github.run_id }})][0:5][].id')
+            --jq '[.workflow_runs[] | select(.conclusion == "success" and .id != ${{ github.run_id }})][0:10][].id')
           PREV_DIRS=""
           for RUN_ID in $RUN_IDS; do
             if gh run download "$RUN_ID" --repo "${{ github.repository }}" \
@@ -465,8 +468,18 @@ jobs:
             benchmark-raw \
             benchmark-raw-merged \
             $PREV_DIRS
+          # A run that produced zero fresh benchmark results (e.g. a subset
+          # re-dispatch whose cells cpu-missed again) must not publish: it would
+          # replace a healthy report with an all-stale one. The previous report
+          # stays live instead.
+          COUNT=$(find benchmark-raw -name '*.json' 2>/dev/null | wc -l)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::warning::No fresh benchmark results in this run; keeping the previous report."
+          fi
 
       - name: Generate performance report
+        if: steps.merge.outputs.count != '0'
         run: |
           python3 .github/scripts/generate-performance-report.py \
             benchmark-raw-merged \
@@ -475,6 +488,7 @@ jobs:
             "${GITHUB_SHA}"
 
       - name: Generate performance summary SVG
+        if: steps.merge.outputs.count != '0'
         run: |
           python3 .github/scripts/generate-performance-svg.py \
             benchmark-raw-merged \
@@ -483,6 +497,7 @@ jobs:
             "${GITHUB_SHA}"
 
       - name: Generate per-scenario SVGs
+        if: steps.merge.outputs.count != '0'
         run: |
           python3 .github/scripts/generate-performance-svg.py \
             benchmark-raw-merged \
@@ -491,7 +506,7 @@ jobs:
             "${GITHUB_SHA}"
 
       - name: Delete previous performance-report artifacts
-        if: always()
+        if: steps.merge.outputs.count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -505,7 +520,7 @@ jobs:
             done
 
       - name: Upload performance report
-        if: always()
+        if: steps.merge.outputs.count != '0'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: performance-report
@@ -513,11 +528,11 @@ jobs:
           if-no-files-found: error
 
       - name: Configure GitHub Pages
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0'
         uses: actions/configure-pages@v6
 
       - name: Delete previous github-pages artifacts
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -537,7 +552,7 @@ jobs:
             done
 
       - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0'
         uses: actions/upload-pages-artifact@v5
         with:
           path: target/performance-report/
@@ -613,7 +628,7 @@ jobs:
     concurrency:
       group: github-pages-deploy
       cancel-in-progress: false
-    if: always() && !cancelled() && needs.report.result == 'success' && github.ref == 'refs/heads/master'
+    if: always() && !cancelled() && needs.report.result == 'success' && github.ref == 'refs/heads/master' && needs.report.outputs.fresh != '0'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
