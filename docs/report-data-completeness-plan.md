@@ -75,3 +75,10 @@
 5. 结果：修复后 run 全绿，线上报告 7 档全为新鲜真实数据，无 0.00 无 †。
 
 诊断辅助：`ci(benchmark)` 步骤新增失败时上传 hs_err + dumpstream（`169605f`），本轮正是靠它拿到实锤。
+
+## 六、陈旧数据可追溯性（2026-07-18）
+
+用户问"从报告中怎么知道陈旧数据是什么时候、什么版本产生的"。彼时：时间戳仅在固定档表脚注可见，版本完全不可知（JSON 的 `nativeVersion` 只是 hs 库 `hs_version()` 字符串，不含产物版本号）。补全：
+
+- `d11ab67` `feat(benchmarks)`：`BenchmarkRecorder` 新增 `artifactVersion` 字段；`JmhBenchmarkRunner` 按实现从 jar 内 `META-INF/maven/<groupId>/<artifactId>/pom.properties` 解析版本（注意 jar 内是**点分** groupId，非仓库斜杠布局——首版误用斜杠导致 unknown，已修正并记录）。
+- `d665d7d` `feat(report)`：stale 脚注升级为 `platform / impl (timestamp · artifactVersion · commit sha)`；Raw Data 节每条列出 artifactVersion + timestamp（新旧格式一视同仁）；SVG stale 行平台名追加 `†MM-DD` 短日期。旧格式（无 artifactVersion）降级为仅时间戳，不炸。
