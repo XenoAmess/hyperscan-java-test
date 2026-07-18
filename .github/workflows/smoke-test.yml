@@ -472,7 +472,11 @@ jobs:
           # re-dispatch whose cells cpu-missed again) must not publish: it would
           # replace a healthy report with an all-stale one. The previous report
           # stays live instead.
-          COUNT=$(find benchmark-raw -name '*.json' 2>/dev/null | wc -l)
+          if [ -d benchmark-raw ]; then
+            COUNT=$(find benchmark-raw -name '*.json' | wc -l)
+          else
+            COUNT=0
+          fi
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           if [ "$COUNT" -eq 0 ]; then
             echo "::warning::No fresh benchmark results in this run; keeping the previous report."
