@@ -1,2 +1,4 @@
 src/test/resources/vectorscan/datafiles/leipzig-3200.txt filter=lfs diff=lfs merge=lfs -text
 src/test/resources/vectorscan/datafiles/lh3lh3-reb-howto.txt filter=lfs diff=lfs merge=lfs -text
+src/test/resources/vectorscan/datafiles/bad_patterns.txt -text
+src/test/resources/vectorscan/datafiles/bad_patterns_fast.txt -text
