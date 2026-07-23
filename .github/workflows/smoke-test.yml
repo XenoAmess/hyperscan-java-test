@@ -82,7 +82,23 @@ jobs:
       - name: Checkout test project
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          lfs: true
+          lfs: false
+
+      # LFS data files (~55 MB) are only needed by the vectorscan functional
+      # tests. With lfs:false the checkout leaves pointer files whose content
+      # is the stable LFS oid, so the cache key only changes when the actual
+      # data changes; on a hit we skip the LFS download entirely (per-run
+      # fetches were exhausting the account LFS bandwidth budget).
+      - name: Cache LFS data files
+        id: lfs-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: src/test/resources/vectorscan/datafiles
+          key: lfs-datafiles-${{ hashFiles('src/test/resources/vectorscan/datafiles/*.txt') }}
+
+      - name: Fetch LFS objects on cache miss
+        if: steps.lfs-cache.outputs.cache-hit != 'true'
+        run: git lfs pull
 
       - name: Set up JDK
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
@@ -217,7 +233,7 @@ jobs:
       - name: Checkout test project
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          lfs: true
+          lfs: false
 
       - name: Set up JDK
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
@@ -424,7 +440,7 @@ jobs:
       - name: Checkout test project
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          lfs: true
+          lfs: false
 
       - name: Resolve effective native version
         shell: bash
