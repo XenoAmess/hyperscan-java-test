@@ -1,5 +1,7 @@
 # hyperscan-java-test
 
+> **English** | [简体中文](README.zh.md)
+
 Smoke and comparison tests for [hyperscan-java-native](https://github.com/XenoAmess/hyperscan-java-native)
 (JavaCPP) and [hyperscan-java-panama](https://github.com/XenoAmess/hyperscan-java-panama)
 across supported platforms and instruction-set tiers.
@@ -56,7 +58,7 @@ mvn test -Dnative.version=5.4.12-2.0.4-x7 -Djavacpp.platform=linux-x86_64
 ## CI
 
 GitHub Actions runs the smoke-test matrix on every push/PR and can be triggered
-manually with a selectable native version. On `master`, JMH benchmarks run
-separately for JavaCPP and Panama on every platform, and a detailed
-cross-platform performance report is published to
+manually with a selectable native version. On `master`, JMH benchmarks run on
+every platform for JavaCPP and Panama (plus the upstream gliwka native on
+Linux), and a detailed cross-platform performance report is published to
 [GitHub Pages](https://xenoamess.github.io/hyperscan-java-test/).
