@@ -98,7 +98,18 @@ jobs:
 
       - name: Fetch LFS objects on cache miss
         if: steps.lfs-cache.outputs.cache-hit != 'true'
-        run: git lfs pull
+        run: |
+          set -e
+          if ! git lfs pull; then
+            echo "::warning::git lfs pull failed (LFS budget exhausted?); falling back to upstream vectorscan sources"
+            BASE="https://raw.githubusercontent.com/VectorCamp/vectorscan/vectorscan/5.4.12/unit/hyperscan/datafiles"
+            for f in leipzig-3200.txt lh3lh3-reb-howto.txt; do
+              POINTER_FILE="src/test/resources/vectorscan/datafiles/$f"
+              EXPECTED=$(grep -oP 'oid sha256:\K[0-9a-f]+' "$POINTER_FILE")
+              curl -fsSL "$BASE/$f" -o "$POINTER_FILE"
+              echo "$EXPECTED  $POINTER_FILE" | sha256sum -c
+            done
+          fi
 
       - name: Set up JDK
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
