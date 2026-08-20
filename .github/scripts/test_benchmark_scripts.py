@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ def load_script(name, filename):
 merge = load_script('merge_benchmark_results', 'merge-benchmark-results.py')
 report = load_script('generate_performance_report', 'generate-performance-report.py')
 svg = load_script('generate_performance_svg', 'generate-performance-svg.py')
+CRASH_CHECK = Path(__file__).with_name('check-crash-logs.sh')
 
 SCENARIO = 'ISA fixed workload (direct buffer)'
 
@@ -323,6 +325,56 @@ class PerformanceReportTest(unittest.TestCase):
             output = Path(directory, 'scenario.svg')
             svg.generate_svg([result()], str(output), '1.0', 'abc123', SCENARIO)
             self.assertIn(SCENARIO, output.read_text(encoding='utf-8'))
+
+
+class CrashLogCheckTest(unittest.TestCase):
+    @staticmethod
+    def run_check(directory):
+        return subprocess.run(
+            ['bash', str(CRASH_CHECK)], cwd=directory, capture_output=True,
+            text=True, check=False)
+
+    @staticmethod
+    def write_dumpstream(directory, content):
+        reports = Path(directory, 'target', 'surefire-reports')
+        reports.mkdir(parents=True)
+        Path(reports, 'test.dumpstream').write_bytes(content.encode('utf-8'))
+
+    def test_benign_windows_classpath_dumpstream_is_ignored(self):
+        warning = (
+            '# Created at 2026-08-20T03:41:25.139\r\n'
+            "Boot Manifest-JAR contains absolute paths in classpath 'D:\\\\a\\\\target\\\\test-classes'\r\n"
+            'Hint: <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>\r\n'
+            "'other' has different root\r\n\r\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            self.write_dumpstream(directory, warning + warning)
+            completed = self.run_check(directory)
+
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        self.assertIn('Ignoring benign Surefire cross-drive classpath diagnostic', completed.stdout)
+
+    def test_dumpstream_with_additional_content_still_fails(self):
+        warning = (
+            '# Created at 2026-08-20T03:41:25.139\n'
+            "Boot Manifest-JAR contains absolute paths in classpath 'D:\\\\a\\\\target\\\\test-classes'\n"
+            'Hint: <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>\n'
+            "'other' has different root\n\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            self.write_dumpstream(directory, warning + 'unexpected fork output\n')
+            completed = self.run_check(directory)
+
+        self.assertEqual(1, completed.returncode)
+        self.assertIn('test.dumpstream', completed.stdout)
+
+    def test_hotspot_error_log_still_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'hs_err_pid1.log').write_text('crash', encoding='utf-8')
+            completed = self.run_check(directory)
+
+        self.assertEqual(1, completed.returncode)
+        self.assertIn('hs_err_pid1.log', completed.stdout)
 
 
 if __name__ == '__main__':
