@@ -102,6 +102,20 @@ class MergeBenchmarkResultsTest(unittest.TestCase):
         self.assertFalse(merge.compatible_stale(
             changed_artifact, platform_reference, platform_reference, implementation_reference))
 
+        cross_platform = json.loads(json.dumps(candidate))
+        cross_platform['actualPlatform'] = 'windows-x86_64'
+        cross_platform['nativeVersion'] = '5.4.2'
+        cross_platform_implementation = json.loads(json.dumps(implementation_reference))
+        cross_platform_implementation['nativeVersion'] = '5.4.12'
+        self.assertTrue(merge.compatible_stale(
+            cross_platform, platform_reference, None, cross_platform_implementation))
+
+        same_platform_reference = json.loads(json.dumps(cross_platform))
+        same_platform_reference['nativeVersion'] = '5.4.12'
+        self.assertFalse(merge.compatible_stale(
+            cross_platform, platform_reference, same_platform_reference,
+            cross_platform_implementation))
+
     def test_entire_skipped_platform_is_backfilled_across_commits(self):
         current_data = result()
         current = {

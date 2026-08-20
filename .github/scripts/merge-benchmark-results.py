@@ -178,7 +178,7 @@ def compatible_stale(candidate, workload_reference, platform_reference=None,
         return False
     platform_fields = (
         'actualPlatform', 'runnerOs', 'runnerArch', 'cpuModel', 'cpuFlags',
-        'javaVersion', 'javaVmName'
+        'javaVersion', 'javaVmName', 'nativeVersion'
     )
     if platform_reference is not None and any(
             candidate.get(field) != platform_reference.get(field)
@@ -186,7 +186,7 @@ def compatible_stale(candidate, workload_reference, platform_reference=None,
         return False
     if implementation_reference is None:
         return False
-    implementation_fields = ('artifactVersion', 'nativeVersion')
+    implementation_fields = ('artifactVersion',)
     return all(
         candidate.get(field) == implementation_reference.get(field)
         for field in implementation_fields)
