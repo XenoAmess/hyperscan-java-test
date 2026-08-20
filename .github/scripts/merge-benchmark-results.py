@@ -229,10 +229,10 @@ def load_results(input_dir):
     return results
 
 
-def collect_stale_results(current, previous_dirs):
+def collect_previous_results(current, previous_dirs, expected_commit=None):
     fresh = [data for _, data in current.values() if not data.get('unsupported')]
     if not fresh:
-        return {}
+        return {}, {}
 
     workload_reference = fresh[0]
     platform_references = {}
@@ -242,30 +242,45 @@ def collect_stale_results(current, previous_dirs):
             platform_references.setdefault(platform, data)
             implementation_references.setdefault(implementation, data)
 
+    same_commit = {}
     stale = {}
     for previous_dir in previous_dirs:
-        for key, (_, data) in load_results(previous_dir).items():
+        for key, (path, data) in load_results(previous_dir).items():
             platform, implementation = key
-            if (key in current or key in stale):
+            if key in current or key in same_commit or key in stale:
                 continue
+            is_same_commit = bool(expected_commit and data.get('commitSha') == expected_commit)
             if data.get('unsupported'):
-                data['stale'] = True
-                stale[key] = data
+                if is_same_commit:
+                    same_commit[key] = (path, data)
+                else:
+                    data['stale'] = True
+                    stale[key] = data
                 continue
+            implementation_reference = implementation_references.get(implementation)
+            if is_same_commit and implementation_reference is None:
+                implementation_reference = data
             if not compatible_stale(
                     data,
                     workload_reference,
                     platform_references.get(platform),
-                    implementation_references.get(implementation)):
+                    implementation_reference):
                 continue
-            data['stale'] = True
-            stale[key] = data
+            if is_same_commit:
+                same_commit[key] = (path, data)
+            else:
+                data['stale'] = True
+                stale[key] = data
             # A wholly skipped platform has no current-run environment to use as
             # a reference. Anchor its remaining implementations to the first
             # compatible result recovered from the same or a newer prior run.
             platform_references.setdefault(platform, data)
             implementation_references.setdefault(implementation, data)
-    return stale
+    return same_commit, stale
+
+
+def collect_stale_results(current, previous_dirs):
+    return collect_previous_results(current, previous_dirs)[1]
 
 
 def has_complete_coverage(current, stale):
@@ -296,7 +311,10 @@ def main():
     current_dir, out_dir = sys.argv[1], sys.argv[2]
     previous_dirs = sys.argv[3:]
 
-    current = matching_current_commit(load_results(current_dir), os.environ.get('GITHUB_SHA'))
+    expected_commit = os.environ.get('GITHUB_SHA')
+    current = matching_current_commit(load_results(current_dir), expected_commit)
+    same_commit, stale = collect_previous_results(current, previous_dirs, expected_commit)
+    current.update(same_commit)
 
     os.makedirs(out_dir, exist_ok=True)
     for key, (path, data) in current.items():
@@ -305,8 +323,6 @@ def main():
         out_name = f"benchmark-result-{key[0]}-{key[1]}.json"
         with open(os.path.join(out_dir, out_name), 'w', encoding='utf-8') as f:
             f.write(content)
-
-    stale = collect_stale_results(current, previous_dirs)
 
     for key, data in stale.items():
         out_name = f"benchmark-result-{key[0]}-{key[1]}.json"

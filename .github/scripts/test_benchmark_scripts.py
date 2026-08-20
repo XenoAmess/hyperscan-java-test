@@ -138,6 +138,24 @@ class MergeBenchmarkResultsTest(unittest.TestCase):
             set(stale))
         self.assertTrue(all(data['stale'] for data in stale.values()))
 
+    def test_same_commit_previous_result_remains_fresh(self):
+        current = {
+            ('linux-x86_64-baseline', 'javacpp'): ('current.json', result()),
+        }
+
+        with tempfile.TemporaryDirectory() as previous_dir:
+            previous = result('windows-x86_64', 'panama')
+            path = Path(previous_dir, 'benchmark-result-panama.json')
+            path.write_text(json.dumps(previous), encoding='utf-8')
+
+            recovered, stale = merge.collect_previous_results(
+                current, [previous_dir], 'abc123')
+
+        key = ('windows-x86_64', 'panama')
+        self.assertIn(key, recovered)
+        self.assertNotIn(key, stale)
+        self.assertNotIn('stale', recovered[key][1])
+
     def test_missing_upstream_without_current_version_reference_is_not_backfilled(self):
         current_data = result()
         current = {
