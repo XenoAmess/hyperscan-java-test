@@ -39,7 +39,6 @@ public class HasMatchShortTextBenchmark {
         public DualScanner scanner;
         public String input;
         public DualExpression expression;
-        public boolean matched;
 
         @Setup(Level.Trial)
         public void setUp() {
@@ -50,7 +49,6 @@ public class HasMatchShortTextBenchmark {
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
             input = "The password is secret.";
-            matched = api.hasMatch(scanner, database, input);
         }
 
         @TearDown(Level.Trial)
@@ -71,12 +69,9 @@ public class HasMatchShortTextBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.setUp();
-        long matchesPerInvocation = state.matched ? 1 : 0;
         BenchmarkResult result = BenchmarkResultConverter.singleShotOps(
-                "hasMatchShortText", runResult.getPrimaryResult(), matchesPerInvocation * 10000);
-        state.tearDown();
-        return result;
+                "wrapperHasMatchShortText", runResult.getPrimaryResult(), 1L);
+        return result.metric("patterns", 1)
+                .metric("inputBytes", BenchmarkData.utf8Length("The password is secret."));
     }
 }

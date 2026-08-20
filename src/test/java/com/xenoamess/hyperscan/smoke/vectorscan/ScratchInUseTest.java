@@ -225,7 +225,11 @@ class ScratchInUseTest {
             assertThat(result).isEqualTo(api.success());
             assertThat(matches.get()).isEqualTo(1);
         } finally {
-            api.closeDatabase(db);
+            try {
+                assertThat(api.freeScratchRaw(scanner)).isEqualTo(api.success());
+            } finally {
+                api.closeDatabase(db);
+            }
         }
     }
 
@@ -250,7 +254,11 @@ class ScratchInUseTest {
             assertThat(result).isEqualTo(api.success());
             assertThat(matches.get()).isEqualTo(1);
         } finally {
-            api.closeDatabase(db);
+            try {
+                assertThat(api.freeScratchRaw(scanner)).isEqualTo(api.success());
+            } finally {
+                api.closeDatabase(db);
+            }
         }
     }
 
@@ -274,7 +282,11 @@ class ScratchInUseTest {
             assertThat(result).isEqualTo(api.success());
             assertThat(matches.get()).isEqualTo(1);
         } finally {
-            api.closeDatabase(db);
+            try {
+                assertThat(api.freeScratchRaw(scanner)).isEqualTo(api.success());
+            } finally {
+                api.closeDatabase(db);
+            }
         }
     }
 }

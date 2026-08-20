@@ -17,8 +17,8 @@
 - 移植的 vectorscan 单元测试套件（`vectorscan/unit/hyperscan`），JavaCPP 与 Panama 双跑 —— 见 [docs/vectorscan-port-status.md](docs/vectorscan-port-status.md)
 - 合成数据：大量随机字面量模式、字符类、长输入
 - 真实数据：HTTP 请求/响应解析、nginx 日志、简单安全签名
-- JMH 基准（编译/扫描场景、数 GB 大流量扫描、指令集粒度），覆盖每个支持的 ISA 档位
-- 三方基准对比：fork native（JavaCPP）、Panama、上游 `com.gliwka.hyperscan:native`（`upstream`）。上游没有 ISA 档位构建，也没有 `windows-x86_64` classifier —— Windows 行输出 `unsupported`
+- JMH 基准（编译/扫描场景、指令集粒度）覆盖每个支持的 ISA 档位；数 GiB 大流量扫描仅在手动运行时选择启用
+- 三方基准对比：fork native（JavaCPP）、Panama、上游 `com.gliwka.hyperscan:native`（`upstream-auto`）。上游没有 ISA 档位构建，也没有 `windows-x86_64` classifier，因此每个 Linux 架构只自动运行一次，Windows 输出 `unsupported`
 
 ## 支持的平台
 
@@ -37,7 +37,8 @@ mvn test
 强制指定某个 ISA 档位：
 
 ```bash
-mvn test -Djavacpp.platform=linux-x86_64-baseline
+mvn test -Djavacpp.platform=linux-x86_64-baseline \
+  -Dorg.bytedeco.javacpp.platform=linux-x86_64-baseline
 ```
 
 可用的 `javacpp.platform` 取值：
@@ -49,13 +50,14 @@ mvn test -Djavacpp.platform=linux-x86_64-baseline
 - `windows-x86_64-baseline`
 - `windows-x86_64`
 
-测试不同的 native 产物版本：
+将 `NATIVE_VERSION` 设置为其他 native 产物版本后进行测试：
 
 ```bash
-mvn test -Dnative.version=5.4.12-2.0.4-x7 -Djavacpp.platform=linux-x86_64
+mvn test -Dnative.version="$NATIVE_VERSION" \
+  -Djavacpp.platform=linux-x86_64 \
+  -Dorg.bytedeco.javacpp.platform=linux-x86_64
 ```
 
 ## CI
 
-GitHub Actions 在每次 push/PR 时运行冒烟测试矩阵，也可手动触发并选择 native 版本。在 `master` 上，JMH 基准会在每个平台上分别运行 JavaCPP 与 Panama（Linux 平台另加上游 gliwka native），详细的跨平台性能报告发布到
-[GitHub Pages](https://xenoamess.github.io/hyperscan-java-test/)。
+GitHub Actions 会对推送到 `master`、release 分支以及所有 PR 运行冒烟测试矩阵，也可手动触发、选择 native 版本并按需启用数 GiB 基准。在 `master` 与 release 分支上，常规 JMH 基准会在每个平台上分别运行 JavaCPP 与 Panama（每个 Linux 架构另运行一次自动调度的上游 gliwka native）。完整的 `master` 结果会将详细的跨平台性能报告发布到 [GitHub Pages](https://xenoamess.github.io/hyperscan-java-test/)。

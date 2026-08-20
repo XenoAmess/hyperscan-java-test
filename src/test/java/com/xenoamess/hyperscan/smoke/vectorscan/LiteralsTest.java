@@ -172,7 +172,7 @@ class LiteralsTest {
     public static class LiteralArgumentsSource implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            return Stream.of(DualImplementation.values())
+            return Stream.of(DualImplementation.functionalValues())
                     .flatMap(impl -> Stream.of(MODES)
                             .flatMap(mode -> Stream.of(ALL_FLAGS)
                                     .flatMap(flags -> Arrays.stream(SIZES).boxed()

@@ -87,6 +87,6 @@ public class ScanSeveralGigabytesNoMatchBenchmark {
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
         long totalBytes = 5L * 1024 * 1024 * 1024;
         return BenchmarkResultConverter.singleShotLarge(
-                "scanSeveralGigabytesNoMatch", runResult.getPrimaryResult(), totalBytes, 0, 1);
+                "scanSeveralGibibytesNoMatch", runResult.getPrimaryResult(), totalBytes, 0L, 1);
     }
 }

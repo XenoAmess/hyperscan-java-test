@@ -17,8 +17,8 @@ across supported platforms and instruction-set tiers.
 - Ported vectorscan unit-test suite (`vectorscan/unit/hyperscan`), dual-run on JavaCPP and Panama — see [docs/vectorscan-port-status.md](docs/vectorscan-port-status.md)
 - Synthetic data: many random literal patterns, character classes, long inputs
 - Real-world data: HTTP request/response parsing, nginx logs, simple security signatures
-- JMH benchmarks (compile/scan scenarios, multi-GB large scans, instruction-set granularity) on every supported ISA tier
-- Three-way benchmark comparison: fork native (JavaCPP), Panama, and upstream `com.gliwka.hyperscan:native` (`upstream`). Upstream has no ISA-tier builds and no `windows-x86_64` classifier — Windows rows report `unsupported`
+- JMH benchmarks (compile/scan scenarios and instruction-set granularity) on every supported ISA tier; multi-GiB scans are opt-in for manual runs
+- Three-way benchmark comparison: fork native (JavaCPP), Panama, and upstream `com.gliwka.hyperscan:native` (`upstream-auto`). Upstream has no ISA-tier builds and no `windows-x86_64` classifier, so it runs once per Linux architecture and Windows reports `unsupported`
 
 ## Supported platforms
 
@@ -37,7 +37,8 @@ mvn test
 Force a specific ISA tier:
 
 ```bash
-mvn test -Djavacpp.platform=linux-x86_64-baseline
+mvn test -Djavacpp.platform=linux-x86_64-baseline \
+  -Dorg.bytedeco.javacpp.platform=linux-x86_64-baseline
 ```
 
 Available `javacpp.platform` values:
@@ -49,16 +50,20 @@ Available `javacpp.platform` values:
 - `windows-x86_64-baseline`
 - `windows-x86_64`
 
-Test a different native artifact version:
+Set `NATIVE_VERSION` to a different native artifact release and test it:
 
 ```bash
-mvn test -Dnative.version=5.4.12-2.0.4-x7 -Djavacpp.platform=linux-x86_64
+mvn test -Dnative.version="$NATIVE_VERSION" \
+  -Djavacpp.platform=linux-x86_64 \
+  -Dorg.bytedeco.javacpp.platform=linux-x86_64
 ```
 
 ## CI
 
-GitHub Actions runs the smoke-test matrix on every push/PR and can be triggered
-manually with a selectable native version. On `master`, JMH benchmarks run on
-every platform for JavaCPP and Panama (plus the upstream gliwka native on
-Linux), and a detailed cross-platform performance report is published to
-[GitHub Pages](https://xenoamess.github.io/hyperscan-java-test/).
+GitHub Actions runs the smoke-test matrix on pushes to `master` and release
+branches, and on every PR. It can also be triggered manually with a selectable
+native version and an opt-in multi-GiB benchmark flag.
+On `master` and release branches, routine JMH benchmarks run on every platform
+for JavaCPP and Panama (plus one auto-dispatched upstream run per Linux
+architecture). Complete `master` results publish a detailed cross-platform
+performance report to [GitHub Pages](https://xenoamess.github.io/hyperscan-java-test/).

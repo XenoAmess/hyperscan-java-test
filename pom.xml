@@ -36,11 +36,10 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <native.version>5.4.12-2.0.4-x10</native.version>
-        <panama.version>5.4.12-rc14</panama.version>
+        <native.version>5.4.12-2.0.4-x11</native.version>
+        <panama.version>5.4.12-rc15</panama.version>
         <upstream.version>5.4.12-2.0.4</upstream.version>
         <javacpp.version>1.5.12</javacpp.version>
-        <javacpp.platform>${os.detected.classifier}</javacpp.platform>
         <jmh.version>1.37</jmh.version>
     </properties>
 
@@ -90,10 +89,6 @@
                 <configuration>
                     <reuseForks>false</reuseForks>
                     <argLine>--enable-native-access=ALL-UNNAMED</argLine>
-                    <systemPropertyVariables>
-                        <org.bytedeco.javacpp.platform>${javacpp.platform}</org.bytedeco.javacpp.platform>
-                        <com.xenoamess.hyperscan_panama.platform>${javacpp.platform}</com.xenoamess.hyperscan_panama.platform>
-                    </systemPropertyVariables>
                 </configuration>
             </plugin>
         </plugins>

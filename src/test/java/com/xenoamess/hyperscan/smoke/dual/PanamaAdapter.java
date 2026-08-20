@@ -40,7 +40,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.function.IntSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import sun.misc.Unsafe;
@@ -50,6 +52,11 @@ public class PanamaAdapter implements DualApi {
     private static final Unsafe UNSAFE = getUnsafe();
 
     static {
+        String requestedPlatform = System.getProperty("javacpp.platform");
+        if (requestedPlatform != null && !requestedPlatform.isBlank()
+                && System.getProperty("com.xenoamess.hyperscan_panama.platform") == null) {
+            System.setProperty("com.xenoamess.hyperscan_panama.platform", requestedPlatform);
+        }
         HyperscanNativeLoader.load();
     }
 
@@ -64,8 +71,11 @@ public class PanamaAdapter implements DualApi {
     }
 
     private static final Arena HS_LIBRARY_ARENA = Arena.global();
-    private static final Arena STREAM_BUFFER_ARENA = Arena.global();
-    private static final ThreadLocal<MemorySegment> STREAM_BUFFER = ThreadLocal.withInitial(() -> MemorySegment.NULL);
+    private static final ThreadLocal<ByteBuffer> STREAM_BUFFER =
+            ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(0));
+    private static final IdentityHashMap<Object, Integer> DATABASE_STREAM_LEASES = new IdentityHashMap<>();
+    private static final IdentityHashMap<Object, Integer> DATABASE_OPERATION_LEASES = new IdentityHashMap<>();
+    private static final Object ALLOCATOR_LOCK = new Object();
     private static final SymbolLookup HS_LIBRARY_LOOKUP;
 
     private static final ThreadLocal<DirectBufferCache> DIRECT_BUFFER_CACHE = ThreadLocal.withInitial(DirectBufferCache::new);
@@ -165,10 +175,11 @@ public class PanamaAdapter implements DualApi {
     private static MemorySegment currentScratchFree;
     private static MemorySegment currentStreamAllocator;
     private static MemorySegment currentStreamFree;
+    private static DualFree effectiveMiscFree;
 
-    private static Arena ensureAllocatorArena() {
+    private static synchronized Arena ensureAllocatorArena() {
         if (allocatorArena == null || !allocatorArena.scope().isAlive()) {
-            allocatorArena = Arena.ofConfined();
+            allocatorArena = Arena.ofShared();
         }
         return allocatorArena;
     }
@@ -178,11 +189,15 @@ public class PanamaAdapter implements DualApi {
             return MemorySegment.NULL;
         }
         return hs_alloc_t.allocate(size -> {
-            long address = alloc.allocate(size);
-            if (address == 0) {
+            try {
+                long address = alloc.allocate(size);
+                if (address == 0) {
+                    return MemorySegment.NULL;
+                }
+                return MemorySegment.ofAddress(address).reinterpret(size);
+            } catch (Throwable ignored) {
                 return MemorySegment.NULL;
             }
-            return MemorySegment.ofAddress(address).reinterpret(size);
         }, arena);
     }
 
@@ -191,10 +206,13 @@ public class PanamaAdapter implements DualApi {
             return MemorySegment.NULL;
         }
         return hs_free_t.allocate(ptr -> {
-            if (ptr == null || ptr.address() == 0) {
-                return;
+            try {
+                if (ptr != null && ptr.address() != 0) {
+                    free.free(ptr.address());
+                }
+            } catch (Throwable ignored) {
+                // Native free callbacks must not throw across the upcall boundary.
             }
-            free.free(ptr.address());
         }, arena);
     }
 
@@ -212,43 +230,141 @@ public class PanamaAdapter implements DualApi {
         }
     }
 
-    private static void freeSegment(MemorySegment segment) {
-        if (segment == null || segment == MemorySegment.NULL) {
+    private static void freeMiscSegment(MemorySegment segment) {
+        if (segment == null || segment.address() == 0) {
             return;
         }
-        HYPERSCAN_JNI.free(segment);
+        DualFree free = effectiveMiscFree;
+        if (free != null) {
+            free.free(segment.address());
+        } else {
+            HYPERSCAN_JNI.free(segment);
+        }
+    }
+
+    private static Object databaseLeaseKey(DualDatabase database) {
+        return database instanceof PanamaRawDatabase raw ? raw.state : database;
+    }
+
+    private static void acquireDatabaseStreamLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            DATABASE_STREAM_LEASES.put(key, DATABASE_STREAM_LEASES.getOrDefault(key, 0) + 1);
+        }
+    }
+
+    private static void releaseDatabaseStreamLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            Integer count = DATABASE_STREAM_LEASES.get(key);
+            if (count == null || count == 0) {
+                throw new IllegalStateException("Database stream lease is not held");
+            }
+            if (count == 1) {
+                DATABASE_STREAM_LEASES.remove(key);
+            } else {
+                DATABASE_STREAM_LEASES.put(key, count - 1);
+            }
+        }
+    }
+
+    private static void acquireDatabaseOperationLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            DATABASE_OPERATION_LEASES.put(
+                    key, DATABASE_OPERATION_LEASES.getOrDefault(key, 0) + 1);
+        }
+    }
+
+    private static void releaseDatabaseOperationLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            Integer count = DATABASE_OPERATION_LEASES.get(key);
+            if (count == null || count == 0) {
+                throw new IllegalStateException("Database operation lease is not held");
+            }
+            if (count == 1) {
+                DATABASE_OPERATION_LEASES.remove(key);
+            } else {
+                DATABASE_OPERATION_LEASES.put(key, count - 1);
+            }
+        }
+    }
+
+    private static PanamaDatabaseOperation acquireDatabaseOperation(DualDatabase database) {
+        acquireDatabaseOperationLease(database);
+        try {
+            return new PanamaDatabaseOperation(database, nativeDatabase(database));
+        } catch (RuntimeException | Error e) {
+            releaseDatabaseOperationLease(database);
+            throw e;
+        }
+    }
+
+    private static final class PanamaDatabaseOperation implements AutoCloseable {
+        final DualDatabase owner;
+        final MemorySegment database;
+
+        PanamaDatabaseOperation(DualDatabase owner, MemorySegment database) {
+            this.owner = owner;
+            this.database = database;
+        }
+
+        @Override
+        public void close() {
+            releaseDatabaseOperationLease(owner);
+        }
+    }
+
+    private static int freeDatabaseWhenUnused(DualDatabase database, IntSupplier free) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            if (DATABASE_STREAM_LEASES.getOrDefault(databaseLeaseKey(database), 0) != 0) {
+                throw new IllegalStateException("Database is in use by an open stream");
+            }
+            if (DATABASE_OPERATION_LEASES.getOrDefault(databaseLeaseKey(database), 0) != 0) {
+                throw new IllegalStateException("Database is in use by an active operation");
+            }
+            return free.getAsInt();
+        }
+    }
+
+    private static void closeDatabaseWhenUnused(DualDatabase database, Runnable close) {
+        freeDatabaseWhenUnused(database, () -> {
+            close.run();
+            return hyperscan.HS_SUCCESS();
+        });
     }
 
     private static MemorySegment reinterpretHandle(MemorySegment segment) {
-        if (segment == null || segment == MemorySegment.NULL) {
+        if (segment == null || segment.address() == 0) {
             return MemorySegment.NULL;
         }
         return segment.reinterpret(8, Arena.global(), null);
     }
 
     private static MemorySegment reinterpretCompileError(MemorySegment segment) {
-        if (segment == null || segment == MemorySegment.NULL) {
+        if (segment == null || segment.address() == 0) {
             return MemorySegment.NULL;
         }
         return segment.reinterpret(hs_compile_error.sizeof(), Arena.global(), null);
     }
 
     private static MemorySegment reinterpretExprInfo(MemorySegment segment) {
-        if (segment == null || segment == MemorySegment.NULL) {
+        if (segment == null || segment.address() == 0) {
             return MemorySegment.NULL;
         }
         return segment.reinterpret(hs_expr_info.sizeof(), Arena.global(), null);
     }
 
     private static MemorySegment reinterpretString(MemorySegment segment) {
-        if (segment == null || segment == MemorySegment.NULL) {
+        if (segment == null || segment.address() == 0) {
             return MemorySegment.NULL;
         }
         return segment.reinterpret(65536, Arena.global(), null);
     }
 
     private static MemorySegment reinterpretBuffer(MemorySegment segment, long size) {
-        if (segment == null || segment == MemorySegment.NULL) {
+        if (segment == null || segment.address() == 0) {
             return MemorySegment.NULL;
         }
         return segment.reinterpret(size, Arena.global(), null);
@@ -280,61 +396,100 @@ public class PanamaAdapter implements DualApi {
 
     private static final HyperscanJni HYPERSCAN_JNI = HyperscanNativeLoader.loadJni();
 
-    private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = ThreadLocal.withInitial(HandlerContext::new);
+    private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = new ThreadLocal<>();
 
     private static final MemorySegment MATCH_HANDLER = HYPERSCAN_JNI.allocateMatchEventHandler(
             (id, from, to, flags) -> {
                 HandlerContext ctx = STREAM_CALLBACK.get();
-                if (ctx == null || ctx.handler == null) {
-                    return 0;
+                try {
+                    if (ctx == null || ctx.handler == null) {
+                        return 0;
+                    }
+                    DualExpression[] byId = ctx.expressionsById;
+                    DualExpression expression = id >= 0 && id < byId.length ? byId[id] : null;
+                    if (expression == null) {
+                        expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
+                    }
+                    return ctx.handler.onMatch(expression, from, to) ? 0 : -1;
+                } catch (Throwable failure) {
+                    if (ctx != null && ctx.failure == null) {
+                        ctx.failure = failure;
+                    }
+                    return -1;
                 }
-                DualExpression[] byId = ctx.expressionsById;
-                DualExpression expression = id >= 0 && id < byId.length ? byId[id] : null;
-                if (expression == null) {
-                    expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
-                }
-                return ctx.handler.onMatch(expression, from, to) ? 0 : -1;
             },
             HS_LIBRARY_ARENA
     );
 
     private static final class HandlerContext {
-        DualByteMatchHandler handler;
-        DualExpression[] expressionsById;
+        final DualByteMatchHandler handler;
+        final DualExpression[] expressionsById;
+        final HandlerContext previous;
+        Throwable failure;
+
+        HandlerContext(DualByteMatchHandler handler, DualExpression[] expressionsById,
+                       HandlerContext previous) {
+            this.handler = handler;
+            this.expressionsById = expressionsById;
+            this.previous = previous;
+        }
     }
 
-    private static final ThreadLocal<AdapterByteMatchHandler> ADAPTER_BYTE_HANDLER =
-            ThreadLocal.withInitial(AdapterByteMatchHandler::new);
-    private static final ThreadLocal<AdapterStringMatchHandler> ADAPTER_STRING_HANDLER =
-            ThreadLocal.withInitial(AdapterStringMatchHandler::new);
-
     private static final class AdapterByteMatchHandler implements ByteMatchEventHandler {
-        DualByteMatchHandler handler;
+        final DualByteMatchHandler handler;
+        Throwable failure;
+
+        AdapterByteMatchHandler(DualByteMatchHandler handler) {
+            this.handler = handler;
+        }
 
         @Override
         public boolean onMatch(Expression expression, long from, long to) {
-            return handler.onMatch(toDualExpression(expression), from, to);
+            try {
+                return handler.onMatch(toDualExpression(expression), from, to);
+            } catch (Throwable throwable) {
+                failure = throwable;
+                return false;
+            }
         }
 
         static AdapterByteMatchHandler bind(DualByteMatchHandler handler) {
-            AdapterByteMatchHandler h = ADAPTER_BYTE_HANDLER.get();
-            h.handler = handler;
-            return h;
+            return new AdapterByteMatchHandler(handler);
+        }
+
+        void propagateFailure() {
+            if (failure != null) {
+                throwUnchecked(failure);
+            }
         }
     }
 
     private static final class AdapterStringMatchHandler implements StringMatchEventHandler {
-        DualStringMatchHandler handler;
+        final DualStringMatchHandler handler;
+        Throwable failure;
+
+        AdapterStringMatchHandler(DualStringMatchHandler handler) {
+            this.handler = handler;
+        }
 
         @Override
         public boolean onMatch(Expression expression, long from, long to) {
-            return handler.onMatch(toDualExpression(expression), from, to);
+            try {
+                return handler.onMatch(toDualExpression(expression), from, to);
+            } catch (Throwable throwable) {
+                failure = throwable;
+                return false;
+            }
         }
 
         static AdapterStringMatchHandler bind(DualStringMatchHandler handler) {
-            AdapterStringMatchHandler h = ADAPTER_STRING_HANDLER.get();
-            h.handler = handler;
-            return h;
+            return new AdapterStringMatchHandler(handler);
+        }
+
+        void propagateFailure() {
+            if (failure != null) {
+                throwUnchecked(failure);
+            }
         }
     }
 
@@ -357,60 +512,86 @@ public class PanamaAdapter implements DualApi {
     }
 
     private static void setHandlerContext(DualByteMatchHandler handler, DualExpression[] expressionsById) {
+        STREAM_CALLBACK.set(new HandlerContext(handler, expressionsById, STREAM_CALLBACK.get()));
+    }
+
+    private static int propagateHandlerFailure(int result) {
         HandlerContext ctx = STREAM_CALLBACK.get();
-        ctx.handler = handler;
-        ctx.expressionsById = expressionsById;
+        if (ctx != null && ctx.failure != null) {
+            throwUnchecked(ctx.failure);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <E extends Throwable> void throwUnchecked(Throwable failure) throws E {
+        throw (E) failure;
     }
 
     private static void clearHandlerContext() {
         HandlerContext ctx = STREAM_CALLBACK.get();
-        ctx.handler = null;
-        ctx.expressionsById = null;
+        if (ctx != null && ctx.previous != null) {
+            STREAM_CALLBACK.set(ctx.previous);
+        } else {
+            STREAM_CALLBACK.remove();
+        }
     }
 
     @Override
     public void setAllocator(DualAllocator alloc, DualFree free) {
-        Arena arena = ensureAllocatorArena();
-        currentAllocator = wrapAllocator(alloc, arena);
-        currentFree = wrapFree(free, arena);
-        checkResult(hyperscan.hs_set_allocator(currentAllocator, currentFree));
-        setHsLibraryAllocator("hs_set_allocator", currentAllocator, currentFree);
+        synchronized (ALLOCATOR_LOCK) {
+            Arena arena = ensureAllocatorArena();
+            currentAllocator = wrapAllocator(alloc, arena);
+            currentFree = wrapFree(free, arena);
+            checkResult(hyperscan.hs_set_allocator(currentAllocator, currentFree));
+            setHsLibraryAllocator("hs_set_allocator", currentAllocator, currentFree);
+            effectiveMiscFree = free;
+        }
     }
 
     @Override
     public void setDatabaseAllocator(DualAllocator alloc, DualFree free) {
-        Arena arena = ensureAllocatorArena();
-        currentDatabaseAllocator = wrapAllocator(alloc, arena);
-        currentDatabaseFree = wrapFree(free, arena);
-        checkResult(hyperscan.hs_set_database_allocator(currentDatabaseAllocator, currentDatabaseFree));
-        setHsLibraryAllocator("hs_set_database_allocator", currentDatabaseAllocator, currentDatabaseFree);
+        synchronized (ALLOCATOR_LOCK) {
+            Arena arena = ensureAllocatorArena();
+            currentDatabaseAllocator = wrapAllocator(alloc, arena);
+            currentDatabaseFree = wrapFree(free, arena);
+            checkResult(hyperscan.hs_set_database_allocator(currentDatabaseAllocator, currentDatabaseFree));
+            setHsLibraryAllocator("hs_set_database_allocator", currentDatabaseAllocator, currentDatabaseFree);
+        }
     }
 
     @Override
     public void setMiscAllocator(DualAllocator alloc, DualFree free) {
-        Arena arena = ensureAllocatorArena();
-        currentMiscAllocator = wrapAllocator(alloc, arena);
-        currentMiscFree = wrapFree(free, arena);
-        checkResult(hyperscan.hs_set_misc_allocator(currentMiscAllocator, currentMiscFree));
-        setHsLibraryAllocator("hs_set_misc_allocator", currentMiscAllocator, currentMiscFree);
+        synchronized (ALLOCATOR_LOCK) {
+            Arena arena = ensureAllocatorArena();
+            currentMiscAllocator = wrapAllocator(alloc, arena);
+            currentMiscFree = wrapFree(free, arena);
+            checkResult(hyperscan.hs_set_misc_allocator(currentMiscAllocator, currentMiscFree));
+            setHsLibraryAllocator("hs_set_misc_allocator", currentMiscAllocator, currentMiscFree);
+            effectiveMiscFree = free;
+        }
     }
 
     @Override
     public void setScratchAllocator(DualAllocator alloc, DualFree free) {
-        Arena arena = ensureAllocatorArena();
-        currentScratchAllocator = wrapAllocator(alloc, arena);
-        currentScratchFree = wrapFree(free, arena);
-        checkResult(hyperscan.hs_set_scratch_allocator(currentScratchAllocator, currentScratchFree));
-        setHsLibraryAllocator("hs_set_scratch_allocator", currentScratchAllocator, currentScratchFree);
+        synchronized (ALLOCATOR_LOCK) {
+            Arena arena = ensureAllocatorArena();
+            currentScratchAllocator = wrapAllocator(alloc, arena);
+            currentScratchFree = wrapFree(free, arena);
+            checkResult(hyperscan.hs_set_scratch_allocator(currentScratchAllocator, currentScratchFree));
+            setHsLibraryAllocator("hs_set_scratch_allocator", currentScratchAllocator, currentScratchFree);
+        }
     }
 
     @Override
     public void setStreamAllocator(DualAllocator alloc, DualFree free) {
-        Arena arena = ensureAllocatorArena();
-        currentStreamAllocator = wrapAllocator(alloc, arena);
-        currentStreamFree = wrapFree(free, arena);
-        checkResult(hyperscan.hs_set_stream_allocator(currentStreamAllocator, currentStreamFree));
-        setHsLibraryAllocator("hs_set_stream_allocator", currentStreamAllocator, currentStreamFree);
+        synchronized (ALLOCATOR_LOCK) {
+            Arena arena = ensureAllocatorArena();
+            currentStreamAllocator = wrapAllocator(alloc, arena);
+            currentStreamFree = wrapFree(free, arena);
+            checkResult(hyperscan.hs_set_stream_allocator(currentStreamAllocator, currentStreamFree));
+            setHsLibraryAllocator("hs_set_stream_allocator", currentStreamAllocator, currentStreamFree);
+        }
     }
 
     @Override
@@ -482,19 +663,26 @@ public class PanamaAdapter implements DualApi {
                 extPtr.setAtIndex(ValueLayout.ADDRESS, i, ext);
             }
 
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile_ext_multi(expressionsPtr, flags, ids, extPtr, n, mode, MemorySegment.NULL, dbOut, errOut);
             if (result != 0) {
                 MemorySegment err = reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0));
-                String message = readCompileErrorMessage(err);
-                if (err != null && err != MemorySegment.NULL) {
-                    hyperscan.hs_free_compile_error(err);
+                try {
+                    throw new RuntimeException("Compile error: " + readCompileErrorMessage(err));
+                } finally {
+                    if (err != null && err.address() != 0) {
+                        hyperscan.hs_free_compile_error(err);
+                    }
                 }
-                throw new RuntimeException("Compile error: " + message);
             }
             MemorySegment db = dbOut.get(ValueLayout.ADDRESS, 0);
-            return new PanamaNativeDatabase(db, List.copyOf(expressions));
+            try {
+                return new PanamaNativeDatabase(reinterpretHandle(db), List.copyOf(expressions));
+            } catch (RuntimeException | Error e) {
+                hyperscan.hs_free_database(db);
+                throw e;
+            }
         }
     }
 
@@ -529,15 +717,23 @@ public class PanamaAdapter implements DualApi {
     @Override
     public void allocScratch(DualScanner scanner, DualDatabase database) {
         PanamaScanner s = (PanamaScanner) scanner;
-        PanamaDatabase db = (PanamaDatabase) database;
-        s.scanner().allocScratch(db.database());
+        s.requireOpen();
+        if (database instanceof PanamaDatabase db) {
+            s.scanner.allocScratch(db.database());
+        } else {
+            s.ensureNativeScratch(nativeDatabase(database));
+        }
     }
 
     @Override
     public List<DualMatch> scan(DualScanner scanner, DualDatabase database, String input) {
         PanamaScanner s = (PanamaScanner) scanner;
+        s.requireOpen();
         PanamaDatabase db = (PanamaDatabase) database;
-        List<Match> matches = s.scanner().scan(db.database(), input);
+        List<Match> matches;
+        try (PanamaDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            matches = s.scanner.scan(db.database(), input);
+        }
         List<DualMatch> result = new ArrayList<>();
         for (Match m : matches) {
             result.add(new DualMatch(
@@ -554,96 +750,165 @@ public class PanamaAdapter implements DualApi {
     @Override
     public void scan(DualScanner scanner, DualDatabase database, String input, DualStringMatchHandler handler) {
         PanamaScanner s = (PanamaScanner) scanner;
+        s.requireOpen();
         PanamaDatabase db = (PanamaDatabase) database;
-        s.scanner().scan(db.database(), input, AdapterStringMatchHandler.bind(handler));
+        AdapterStringMatchHandler adapterHandler = AdapterStringMatchHandler.bind(handler);
+        try (PanamaDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            s.scanner.scan(db.database(), input, adapterHandler);
+        }
+        adapterHandler.propagateFailure();
     }
 
     @Override
     public void scan(DualScanner scanner, DualDatabase database, byte[] input, DualByteMatchHandler handler) {
         PanamaScanner s = (PanamaScanner) scanner;
+        s.requireOpen();
         PanamaDatabase db = (PanamaDatabase) database;
-        s.scanner().scan(db.database(), input, AdapterByteMatchHandler.bind(handler));
+        AdapterByteMatchHandler adapterHandler = AdapterByteMatchHandler.bind(handler);
+        try (PanamaDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            s.scanner.scan(db.database(), input, adapterHandler);
+        }
+        adapterHandler.propagateFailure();
     }
 
     @Override
     public void scan(DualScanner scanner, DualDatabase database, ByteBuffer input, DualByteMatchHandler handler) {
         PanamaScanner s = (PanamaScanner) scanner;
+        s.requireOpen();
         PanamaDatabase db = (PanamaDatabase) database;
-        s.scanner().scan(db.database(), input, AdapterByteMatchHandler.bind(handler));
+        AdapterByteMatchHandler adapterHandler = AdapterByteMatchHandler.bind(handler);
+        try (PanamaDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            s.scanner.scan(db.database(), input, adapterHandler);
+        }
+        adapterHandler.propagateFailure();
     }
 
     @Override
     public boolean hasMatch(DualScanner scanner, DualDatabase database, String input) {
         PanamaScanner s = (PanamaScanner) scanner;
+        s.requireOpen();
         PanamaDatabase db = (PanamaDatabase) database;
-        return s.scanner().hasMatch(db.database(), input);
+        try (PanamaDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            return s.scanner.hasMatch(db.database(), input);
+        }
     }
 
     @Override
     public boolean hasMatch(DualScanner scanner, DualDatabase database, byte[] input) {
         PanamaScanner s = (PanamaScanner) scanner;
+        s.requireOpen();
         PanamaDatabase db = (PanamaDatabase) database;
-        return s.scanner().hasMatch(db.database(), input);
+        try (PanamaDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            return s.scanner.hasMatch(db.database(), input);
+        }
     }
 
     @Override
     public DualStream openStream(DualDatabase database) {
-        MemorySegment db = nativeDatabase(database);
-        List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
-        MemorySegment streamOut = zeroAddressOut(HS_LIBRARY_ARENA);
-        checkResult(hyperscan.hs_open_stream(db, 0, streamOut));
-        MemorySegment stream = reinterpretHandle(streamOut.get(ValueLayout.ADDRESS, 0));
-        MemorySegment scratchOut = zeroAddressOut(HS_LIBRARY_ARENA);
-        checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
-        MemorySegment scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
-        return new PanamaStream(stream, scratch, expressions);
+        acquireDatabaseStreamLease(database);
+        boolean transferred = false;
+        try {
+            MemorySegment db = nativeDatabase(database);
+            List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb
+                    ? nativeDb.expressions() : List.of();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment streamOut = zeroAddressOut(arena);
+                checkResult(hyperscan.hs_open_stream(db, 0, streamOut));
+                MemorySegment stream = reinterpretHandle(streamOut.get(ValueLayout.ADDRESS, 0));
+                try {
+                    MemorySegment scratchOut = zeroAddressOut(arena);
+                    checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
+                    MemorySegment scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
+                    try {
+                        PanamaStream result = new PanamaStream(
+                                stream, new PanamaScratchState(scratch), expressions, database);
+                        transferred = true;
+                        return result;
+                    } catch (RuntimeException | Error e) {
+                        hyperscan.hs_free_scratch(scratch);
+                        throw e;
+                    }
+                } catch (RuntimeException | Error e) {
+                    hyperscan.hs_close_stream(stream, MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL);
+                    throw e;
+                }
+            }
+        } finally {
+            if (!transferred) {
+                releaseDatabaseStreamLease(database);
+            }
+        }
     }
 
     private static MemorySegment getStreamBuffer(byte[] input) {
         if (input == null) {
             return MemorySegment.NULL;
         }
-        MemorySegment buffer = STREAM_BUFFER.get();
-        if (buffer == MemorySegment.NULL || buffer.byteSize() < input.length) {
-            buffer = STREAM_BUFFER_ARENA.allocate(input.length, 64);
+        ByteBuffer buffer = STREAM_BUFFER.get();
+        if (buffer.capacity() < input.length) {
+            buffer = ByteBuffer.allocateDirect(input.length);
             STREAM_BUFFER.set(buffer);
         }
-        UNSAFE.copyMemory(input, Unsafe.ARRAY_BYTE_BASE_OFFSET, null, buffer.address(), input.length);
-        return buffer;
+        buffer.clear();
+        MemorySegment segment = MemorySegment.ofBuffer(buffer);
+        UNSAFE.copyMemory(input, Unsafe.ARRAY_BYTE_BASE_OFFSET, null, segment.address(), input.length);
+        buffer.limit(input.length);
+        return segment.asSlice(0, input.length);
+    }
+
+    private static PanamaStreamInput streamInput(byte[] input) {
+        if (input == null || STREAM_CALLBACK.get() == null) {
+            return new PanamaStreamInput(getStreamBuffer(input), null);
+        }
+        Arena arena = Arena.ofConfined();
+        try {
+            return new PanamaStreamInput(allocateBytes(arena, input), arena);
+        } catch (RuntimeException | Error e) {
+            arena.close();
+            throw e;
+        }
+    }
+
+    private record PanamaStreamInput(MemorySegment data, Arena arena) implements AutoCloseable {
+        @Override
+        public void close() {
+            if (arena != null) {
+                arena.close();
+            }
+        }
     }
 
     @Override
     public void scanStream(DualScanner scanner, DualStream stream, byte[] input, DualByteMatchHandler handler) {
         PanamaStream s = (PanamaStream) stream;
-        if (s.closed) {
-            throw new IllegalStateException("Stream is already closed");
-        }
-        if (handler != null) {
-            setHandlerContext(handler, s.expressionsById);
-        }
-        try {
-            MemorySegment data = getStreamBuffer(input);
-            int length = input == null ? 4 : input.length;
-            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
-                checkResult(result);
+        MemorySegment nativeStream = s.beginOperation();
+        try (PanamaStreamInput data = streamInput(input)) {
+            MemorySegment scratch = streamScratch(scanner, s);
+            if (handler != null) {
+                setHandlerContext(handler, s.expressionsById);
+            }
+            try {
+                int length = input == null ? 4 : input.length;
+                int result = propagateHandlerFailure(hyperscan.hs_scan_stream(
+                        nativeStream, data.data(), length, 0, scratch,
+                        handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
+                    checkResult(result);
+                }
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
             }
         } finally {
-            if (handler != null) {
-                clearHandlerContext();
-            }
+            s.endOperation();
         }
     }
 
     @Override
     public void scanStream(DualScanner scanner, DualStream stream, ByteBuffer input, DualByteMatchHandler handler) {
         PanamaStream s = (PanamaStream) stream;
-        if (s.closed) {
-            throw new IllegalStateException("Stream is already closed");
-        }
-        if (handler != null) {
-            setHandlerContext(handler, s.expressionsById);
-        }
+        MemorySegment nativeStream = s.beginOperation();
         try {
             MemorySegment data;
             int length;
@@ -654,29 +919,41 @@ public class PanamaAdapter implements DualApi {
                 data = directBufferSegment(input);
                 length = input.remaining();
             }
-            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
-                checkResult(result);
+            MemorySegment scratch = streamScratch(scanner, s);
+            if (handler != null) {
+                setHandlerContext(handler, s.expressionsById);
+            }
+            try {
+                int result = propagateHandlerFailure(hyperscan.hs_scan_stream(
+                        nativeStream, data, length, 0, scratch,
+                        handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
+                    checkResult(result);
+                }
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
             }
         } finally {
-            if (handler != null) {
-                clearHandlerContext();
-            }
+            s.endOperation();
         }
     }
 
     @Override
     public void closeStream(DualScanner scanner, DualStream stream, DualByteMatchHandler handler) {
         PanamaStream s = (PanamaStream) stream;
-        if (s.closed) {
+        if (s.isClosed()) {
+            s.close();
             return;
         }
-        s.closed = true;
         if (handler != null) {
             setHandlerContext(handler, s.expressionsById);
         }
         try {
-            int result = hyperscan.hs_close_stream(s.stream, s.scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
+            int result = propagateHandlerFailure(s.closeNative(
+                    streamScratch(scanner, s),
+                    handler == null ? MemorySegment.NULL : MATCH_HANDLER, false));
             if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
                 checkResult(result);
             }
@@ -684,34 +961,24 @@ public class PanamaAdapter implements DualApi {
             if (handler != null) {
                 clearHandlerContext();
             }
-            hyperscan.hs_free_scratch(s.scratch);
         }
     }
 
     @Override
     public void scanVector(DualScanner scanner, DualDatabase database, byte[][] input, DualByteMatchHandler handler) {
-        MemorySegment db = nativeDatabase(database);
-        List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
-        if (handler != null) {
-            setHandlerContext(handler, buildExpressionLookup(expressions));
+        if (input == null) {
+            throw new IllegalArgumentException("Input vector is null");
         }
-        try {
-            try (Arena arena = Arena.ofConfined()) {
-                MemorySegment existingScratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
-                MemorySegment scratchOut = null;
-                MemorySegment scratch;
-                if (existingScratch == null || existingScratch == MemorySegment.NULL) {
-                    scratchOut = zeroAddressOut(arena);
-                    checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
-                    scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
-                } else {
-                    scratch = existingScratch;
-                }
-                try {
-                    int[] lengths = new int[input.length];
-                    for (int i = 0; i < input.length; i++) {
-                        lengths[i] = input[i] == null ? 4 : input[i].length;
-                    }
+        try (PanamaDatabaseOperation operation = acquireDatabaseOperation(database);
+             PanamaVectorScratch scratchUse = acquireVectorScratch(scanner, operation.database)) {
+            MemorySegment db = operation.database;
+            MemorySegment scratch = scratchUse.scratch;
+            List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
+            if (handler != null) {
+                setHandlerContext(handler, buildExpressionLookup(expressions));
+            }
+            try {
+                try (Arena arena = Arena.ofConfined()) {
                     MemorySegment dataPtrs = arena.allocate(input.length * ValueLayout.ADDRESS.byteSize());
                     MemorySegment lengthPtr = arena.allocate(input.length * ValueLayout.JAVA_INT.byteSize());
                     for (int i = 0; i < input.length; i++) {
@@ -720,19 +987,17 @@ public class PanamaAdapter implements DualApi {
                         dataPtrs.setAtIndex(ValueLayout.ADDRESS, i, dataSeg);
                         lengthPtr.setAtIndex(ValueLayout.JAVA_INT, i, data == null ? 4 : data.length);
                     }
-                    int result = hyperscan.hs_scan_vector(db, dataPtrs, lengthPtr, input.length, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
+                    int result = propagateHandlerFailure(hyperscan.hs_scan_vector(
+                            db, dataPtrs, lengthPtr, input.length, 0, scratch,
+                            handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
                     if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED()) {
                         checkResult(result);
                     }
-                } finally {
-                    if (scratchOut != null) {
-                        hyperscan.hs_free_scratch(scratch);
-                    }
                 }
-            }
-        } finally {
-            if (handler != null) {
-                clearHandlerContext();
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
             }
         }
     }
@@ -765,9 +1030,11 @@ public class PanamaAdapter implements DualApi {
             MemorySegment infoOut = zeroAddressOut(arena);
             checkResult(hyperscan.hs_serialized_database_info(dataSeg, data.length, infoOut));
             MemorySegment info = reinterpretString(infoOut.get(ValueLayout.ADDRESS, 0));
-            String result = info.getString(0);
-            freeSegment(info);
-            return result;
+            try {
+                return info.getString(0);
+            } finally {
+                freeMiscSegment(info);
+            }
         }
     }
 
@@ -789,10 +1056,13 @@ public class PanamaAdapter implements DualApi {
             checkResult(hyperscan.hs_serialize_database(db, bytesOut, sizeOut));
             long length = sizeOut.get(ValueLayout.JAVA_LONG, 0);
             MemorySegment bytes = reinterpretBuffer(bytesOut.get(ValueLayout.ADDRESS, 0), length);
-            byte[] out = new byte[(int) length];
-            MemorySegment.copy(bytes, 0, MemorySegment.ofArray(out), 0, length);
-            freeSegment(bytes);
-            return out;
+            try {
+                byte[] out = new byte[Math.toIntExact(length)];
+                MemorySegment.copy(bytes, 0, MemorySegment.ofArray(out), 0, length);
+                return out;
+            } finally {
+                freeMiscSegment(bytes);
+            }
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -810,7 +1080,7 @@ public class PanamaAdapter implements DualApi {
     private static DualDatabase deserializeNative(byte[] data) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment dataSeg = allocateBytes(arena, data);
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
             checkResult(hyperscan.hs_deserialize_database(dataSeg, data.length, dbOut));
             MemorySegment db = reinterpretHandle(dbOut.get(ValueLayout.ADDRESS, 0));
             return new PanamaNativeDatabase(db, List.of());
@@ -827,9 +1097,9 @@ public class PanamaAdapter implements DualApi {
     @Override
     public void closeDatabase(DualDatabase database) {
         if (database instanceof PanamaDatabase wrapper) {
-            wrapper.database().close();
+            wrapper.close();
         } else if (database instanceof PanamaNativeDatabase nativeDb) {
-            checkResult(hyperscan.hs_free_database(nativeDb.database()));
+            nativeDb.close();
         } else if (database instanceof PanamaRawDatabase rawDb) {
             rawDb.close();
         }
@@ -851,7 +1121,7 @@ public class PanamaAdapter implements DualApi {
     @Override
     public long getScannerSize(DualScanner scanner) {
         if (scanner instanceof PanamaScanner wrapper) {
-            return wrapper.scanner().getSize();
+            return wrapper.getSize();
         }
         MemorySegment scratch = nativeScratch(scanner);
         try (Arena arena = Arena.ofConfined()) {
@@ -868,6 +1138,10 @@ public class PanamaAdapter implements DualApi {
 
     @Override
     public String getPlatform() {
+        String requestedPlatform = System.getProperty("com.xenoamess.hyperscan_panama.platform");
+        if (requestedPlatform != null && !requestedPlatform.isBlank()) {
+            return requestedPlatform;
+        }
         return HyperscanNativeLoader.selectPlatform();
     }
 
@@ -999,8 +1273,8 @@ public class PanamaAdapter implements DualApi {
     public DualCompileResult compileRaw(String pattern, int flags, int mode) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment expr = pattern == null ? MemorySegment.NULL : arena.allocateFrom(pattern);
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile(expr, flags, mode, MemorySegment.NULL, dbOut, errOut);
             return buildCompileResult(result, dbOut, errOut, pattern == null ? List.of() : List.of(new DualExpression(pattern, EnumSet.noneOf(DualExpressionFlag.class), 0)));
         } catch (Throwable e) {
@@ -1015,8 +1289,8 @@ public class PanamaAdapter implements DualApi {
             MemorySegment plat = arena.allocate(hs_platform_info.layout());
             hs_platform_info.tune(plat, platform.tune());
             hs_platform_info.cpu_features(plat, platform.cpuFeatures());
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile(expr, flags, mode, plat, dbOut, errOut);
             return buildCompileResult(result, dbOut, errOut, pattern == null ? List.of() : List.of(new DualExpression(pattern, EnumSet.noneOf(DualExpressionFlag.class), 0)));
         } catch (Throwable e) {
@@ -1038,8 +1312,8 @@ public class PanamaAdapter implements DualApi {
             applyExprExt(extStruct, ext);
             MemorySegment extPtr = zeroAddressOut(arena);
             extPtr.set(ValueLayout.ADDRESS, 0, extStruct);
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile_ext_multi(expressionsPtr, flagsPtr, idsPtr, extPtr, 1, mode, MemorySegment.NULL, dbOut, errOut);
             return buildCompileResult(result, dbOut, errOut, pattern == null ? List.of() : List.of(new DualExpression(pattern, EnumSet.noneOf(DualExpressionFlag.class), 0)));
         }
@@ -1047,15 +1321,23 @@ public class PanamaAdapter implements DualApi {
 
     private static DualCompileResult buildCompileResult(int result, MemorySegment dbOut, MemorySegment errOut, List<DualExpression> expressions) {
         if (result == 0) {
-            MemorySegment db = reinterpretHandle(dbOut.get(ValueLayout.ADDRESS, 0));
-            return new DualCompileResult(0, new PanamaNativeDatabase(db, List.copyOf(expressions)), null);
+            MemorySegment db = dbOut.get(ValueLayout.ADDRESS, 0);
+            try {
+                return new DualCompileResult(0,
+                        new PanamaNativeDatabase(reinterpretHandle(db), List.copyOf(expressions)), null);
+            } catch (RuntimeException | Error e) {
+                hyperscan.hs_free_database(db);
+                throw e;
+            }
         }
         MemorySegment err = reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0));
-        String message = readCompileErrorMessage(err);
-        if (err != null && err != MemorySegment.NULL) {
-            hyperscan.hs_free_compile_error(err);
+        try {
+            return new DualCompileResult(result, null, readCompileErrorMessage(err));
+        } finally {
+            if (err != null && err.address() != 0) {
+                hyperscan.hs_free_compile_error(err);
+            }
         }
-        return new DualCompileResult(result, null, message);
     }
 
     @Override
@@ -1081,8 +1363,8 @@ public class PanamaAdapter implements DualApi {
                 flags.setAtIndex(ValueLayout.JAVA_INT, i, toFlagBits(expr.flags()));
                 ids.setAtIndex(ValueLayout.JAVA_INT, i, expr.id() != null ? expr.id() : 0);
             }
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile_multi(expressionsPtr, flags, ids, n, mode, MemorySegment.NULL, dbOut, errOut);
             return buildCompileResult(result, dbOut, errOut, expressions == null ? List.of() : expressions);
         }
@@ -1112,8 +1394,8 @@ public class PanamaAdapter implements DualApi {
                     idsPtr.setAtIndex(ValueLayout.JAVA_INT, i, ids[i]);
                 }
             }
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile_multi(expressionsPtr, flagsPtr, idsPtr, n, mode, MemorySegment.NULL, dbOut, errOut);
             return buildCompileResult(result, dbOut, errOut, expressions);
         }
@@ -1123,14 +1405,16 @@ public class PanamaAdapter implements DualApi {
     public DualCompileResult compileNullOutputRaw(String pattern, int flags, int mode) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment expr = pattern == null ? MemorySegment.NULL : arena.allocateFrom(pattern);
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile(expr, flags, mode, MemorySegment.NULL, MemorySegment.NULL, errOut);
             MemorySegment err = reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0));
-            String message = readCompileErrorMessage(err);
-            if (err != null && err != MemorySegment.NULL) {
-                hyperscan.hs_free_compile_error(err);
+            try {
+                return new DualCompileResult(result, null, readCompileErrorMessage(err));
+            } finally {
+                if (err != null && err.address() != 0) {
+                    hyperscan.hs_free_compile_error(err);
+                }
             }
-            return new DualCompileResult(result, null, message);
         }
     }
 
@@ -1156,14 +1440,16 @@ public class PanamaAdapter implements DualApi {
                     idsPtr.setAtIndex(ValueLayout.JAVA_INT, i, ids[i]);
                 }
             }
-            MemorySegment errOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment errOut = zeroAddressOut(arena);
             int result = hyperscan.hs_compile_multi(expressionsPtr, flagsPtr, idsPtr, n, mode, MemorySegment.NULL, MemorySegment.NULL, errOut);
             MemorySegment err = reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0));
-            String message = readCompileErrorMessage(err);
-            if (err != null && err != MemorySegment.NULL) {
-                hyperscan.hs_free_compile_error(err);
+            try {
+                return new DualCompileResult(result, null, readCompileErrorMessage(err));
+            } finally {
+                if (err != null && err.address() != 0) {
+                    hyperscan.hs_free_compile_error(err);
+                }
             }
-            return new DualCompileResult(result, null, message);
         }
     }
 
@@ -1174,11 +1460,16 @@ public class PanamaAdapter implements DualApi {
         }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment dataSeg = allocateBytes(arena, data);
-            MemorySegment dbOut = zeroAddressOut(HS_LIBRARY_ARENA);
+            MemorySegment dbOut = zeroAddressOut(arena);
             int result = hyperscan.hs_deserialize_database(dataSeg, data.length, dbOut);
             if (result == 0) {
-            MemorySegment db = reinterpretHandle(dbOut.get(ValueLayout.ADDRESS, 0));
-                return DualResult.success(new PanamaNativeDatabase(db, List.of()));
+                MemorySegment db = dbOut.get(ValueLayout.ADDRESS, 0);
+                try {
+                    return DualResult.success(new PanamaNativeDatabase(reinterpretHandle(db), List.of()));
+                } catch (RuntimeException | Error e) {
+                    hyperscan.hs_free_database(db);
+                    throw e;
+                }
             }
             return DualResult.error(result);
         } catch (Throwable e) {
@@ -1212,13 +1503,13 @@ public class PanamaAdapter implements DualApi {
 
     @Override
     public DualDatabase allocateRawDatabase(long size) {
-        Arena arena = Arena.ofConfined();
+        Arena arena = Arena.ofShared();
         MemorySegment memory = arena.allocate(size, 8);
         if ((memory.address() & 7L) != 0) {
             arena.close();
             throw new RuntimeException("Raw database memory is not 8-byte aligned");
         }
-        return new PanamaRawDatabase(memory, memory, arena, true);
+        return new PanamaRawDatabase(memory, new PanamaRawDatabaseState(memory, arena), true);
     }
 
     @Override
@@ -1226,8 +1517,8 @@ public class PanamaAdapter implements DualApi {
         if (!(database instanceof PanamaRawDatabase raw)) {
             throw new IllegalArgumentException("Not a raw database: " + database.getClass());
         }
-        MemorySegment db = raw.memory().asSlice(offset);
-        return new PanamaRawDatabase(db, raw.memory(), raw.arena(), false);
+        MemorySegment db = raw.requireDatabase().asSlice(offset);
+        return new PanamaRawDatabase(db, raw.state, false);
     }
 
     @Override
@@ -1245,10 +1536,13 @@ public class PanamaAdapter implements DualApi {
             }
             long length = sizeOut.get(ValueLayout.JAVA_LONG, 0);
             MemorySegment bytes = reinterpretBuffer(bytesOut.get(ValueLayout.ADDRESS, 0), length);
-            byte[] out = new byte[(int) length];
-            MemorySegment.copy(bytes, 0, MemorySegment.ofArray(out), 0, length);
-            freeSegment(bytes);
-            return DualResult.success(out);
+            try {
+                byte[] out = new byte[Math.toIntExact(length)];
+                MemorySegment.copy(bytes, 0, MemorySegment.ofArray(out), 0, length);
+                return DualResult.success(out);
+            } finally {
+                freeMiscSegment(bytes);
+            }
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -1288,9 +1582,11 @@ public class PanamaAdapter implements DualApi {
             int result = hyperscan.hs_database_info(nativeDatabase(database), infoOut);
             if (result == 0) {
                 MemorySegment info = reinterpretString(infoOut.get(ValueLayout.ADDRESS, 0));
-                String value = info.getString(0);
-                freeSegment(info);
-                return DualResult.success(value);
+                try {
+                    return DualResult.success(info.getString(0));
+                } finally {
+                    freeMiscSegment(info);
+                }
             }
             return DualResult.error(result);
         } catch (Throwable e) {
@@ -1309,9 +1605,11 @@ public class PanamaAdapter implements DualApi {
             int result = hyperscan.hs_serialized_database_info(dataSeg, data.length, infoOut);
             if (result == 0) {
                 MemorySegment info = reinterpretString(infoOut.get(ValueLayout.ADDRESS, 0));
-                String value = info.getString(0);
-                freeSegment(info);
-                return DualResult.success(value);
+                try {
+                    return DualResult.success(info.getString(0));
+                } finally {
+                    freeMiscSegment(info);
+                }
             }
             return DualResult.error(result);
         }
@@ -1402,12 +1700,13 @@ public class PanamaAdapter implements DualApi {
         if (database == null) {
             return new DualScratchResult(hyperscan.HS_INVALID(), null, null);
         }
-        MemorySegment scratchOut = zeroAddressOut(HS_LIBRARY_ARENA);
-        try {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment scratchOut = zeroAddressOut(arena);
             int result = hyperscan.hs_alloc_scratch(nativeDatabase(database), scratchOut);
             if (result == 0) {
                 MemorySegment scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
-                return new DualScratchResult(0, new PanamaRawScanner(scratch), null);
+                return new DualScratchResult(0,
+                        new PanamaRawScanner(new PanamaScratchState(scratch), true), null);
             }
             return new DualScratchResult(result, null, null);
         } catch (Throwable e) {
@@ -1420,14 +1719,26 @@ public class PanamaAdapter implements DualApi {
         if (database == null) {
             return new DualScratchResult(hyperscan.HS_INVALID(), null, null);
         }
-        MemorySegment scratchOut = zeroAddressOut(HS_LIBRARY_ARENA);
-        MemorySegment existing = existingScratch == null ? MemorySegment.NULL : nativeScratch(existingScratch);
-        scratchOut.set(ValueLayout.ADDRESS, 0, existing);
-        try {
+        if (existingScratch != null
+                && (!(existingScratch instanceof PanamaRawScanner raw) || !raw.isOwner())) {
+            throw new IllegalArgumentException("Scratch is not an owning raw scratch");
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment scratchOut = zeroAddressOut(arena);
+            MemorySegment existing = existingScratch == null ? MemorySegment.NULL : nativeScratch(existingScratch);
+            scratchOut.set(ValueLayout.ADDRESS, 0, existing);
             int result = hyperscan.hs_alloc_scratch(nativeDatabase(database), scratchOut);
             if (result == 0) {
                 MemorySegment scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
-                return new DualScratchResult(0, new PanamaRawScanner(scratch), null);
+                if (existingScratch instanceof PanamaRawScanner raw) {
+                    raw.replace(scratch);
+                    return new DualScratchResult(0, raw, null);
+                }
+                if (existingScratch != null) {
+                    throw new IllegalArgumentException("Unsupported scratch owner: " + existingScratch.getClass());
+                }
+                return new DualScratchResult(0,
+                        new PanamaRawScanner(new PanamaScratchState(scratch), true), null);
             }
             return new DualScratchResult(result, null, null);
         } catch (Throwable e) {
@@ -1454,12 +1765,13 @@ public class PanamaAdapter implements DualApi {
             return new DualScratchResult(hyperscan.HS_INVALID(), null, null);
         }
         MemorySegment src = nativeScratch(source);
-        MemorySegment clonedOut = zeroAddressOut(HS_LIBRARY_ARENA);
-        try {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment clonedOut = zeroAddressOut(arena);
             int result = hyperscan.hs_clone_scratch(src, clonedOut);
             if (result == 0) {
                 MemorySegment cloned = reinterpretHandle(clonedOut.get(ValueLayout.ADDRESS, 0));
-                return new DualScratchResult(0, new PanamaRawScanner(cloned), null);
+                return new DualScratchResult(0,
+                        new PanamaRawScanner(new PanamaScratchState(cloned), true), null);
             }
             return new DualScratchResult(result, null, null);
         } catch (Throwable e) {
@@ -1472,31 +1784,51 @@ public class PanamaAdapter implements DualApi {
         if (database == null) {
             return new DualStreamResult(hyperscan.HS_INVALID(), null, null);
         }
-        MemorySegment db = nativeDatabase(database);
-        MemorySegment streamOut = zeroAddressOut(HS_LIBRARY_ARENA);
+        acquireDatabaseStreamLease(database);
+        boolean transferred = false;
         try {
-            int result = hyperscan.hs_open_stream(db, 0, streamOut);
-            if (result != 0) {
-                return new DualStreamResult(result, null, null);
+            MemorySegment db = nativeDatabase(database);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment streamOut = zeroAddressOut(arena);
+                int result = hyperscan.hs_open_stream(db, 0, streamOut);
+                if (result != 0) {
+                    return new DualStreamResult(result, null, null);
+                }
+                MemorySegment stream = reinterpretHandle(streamOut.get(ValueLayout.ADDRESS, 0));
+                MemorySegment scratchOut = zeroAddressOut(arena);
+                int allocResult = hyperscan.hs_alloc_scratch(db, scratchOut);
+                if (allocResult != 0) {
+                    hyperscan.hs_close_stream(stream, MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL);
+                    return new DualStreamResult(allocResult, null, null);
+                }
+                MemorySegment scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
+                List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb
+                        ? nativeDb.expressions() : List.of();
+                try {
+                    PanamaStream opened = new PanamaStream(
+                            stream, new PanamaScratchState(scratch), expressions, database);
+                    DualStreamResult response = new DualStreamResult(0, opened, null);
+                    transferred = true;
+                    return response;
+                } catch (RuntimeException | Error e) {
+                    hyperscan.hs_free_scratch(scratch);
+                    hyperscan.hs_close_stream(stream, MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL);
+                    throw e;
+                }
             }
-            MemorySegment stream = reinterpretHandle(streamOut.get(ValueLayout.ADDRESS, 0));
-            MemorySegment scratchOut = zeroAddressOut(HS_LIBRARY_ARENA);
-            int allocResult = hyperscan.hs_alloc_scratch(db, scratchOut);
-            if (allocResult != 0) {
-                hyperscan.hs_close_stream(stream, MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL);
-                return new DualStreamResult(allocResult, null, null);
-            }
-            MemorySegment scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
-            List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
-            return new DualStreamResult(0, new PanamaStream(stream, scratch, expressions), null);
         } catch (Throwable e) {
             throw new RuntimeException(e);
+        } finally {
+            if (!transferred) {
+                releaseDatabaseStreamLease(database);
+            }
         }
     }
 
     @Override
     public DualScanner getStreamScratch(DualStream stream) {
-        return new PanamaRawScanner(((PanamaStream) stream).scratch);
+        PanamaScratchState scratchState = ((PanamaStream) stream).scratchState;
+        return scratchState == null ? null : new PanamaRawScanner(scratchState, false);
     }
 
     @Override
@@ -1513,20 +1845,32 @@ public class PanamaAdapter implements DualApi {
             return hyperscan.HS_INVALID();
         }
         PanamaStream s = (PanamaStream) stream;
-        MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
-        if (handler != null) {
-            setHandlerContext(handler, s.expressionsById);
+        MemorySegment nativeStream;
+        try {
+            nativeStream = s.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID();
         }
         try {
-            try (Arena arena = Arena.ofConfined()) {
-                MemorySegment data = input == null ? MemorySegment.NULL : allocateBytes(arena, input);
-                int length = input == null ? 4 : input.length;
-                return hyperscan.hs_scan_stream(s.stream, data, length, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
+            MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
+            if (handler != null) {
+                setHandlerContext(handler, s.expressionsById);
+            }
+            try {
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment data = input == null ? MemorySegment.NULL : allocateBytes(arena, input);
+                    int length = input == null ? 4 : input.length;
+                    return propagateHandlerFailure(hyperscan.hs_scan_stream(
+                            nativeStream, data, length, 0, scratch,
+                            handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+                }
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
             }
         } finally {
-            if (handler != null) {
-                clearHandlerContext();
-            }
+            s.endOperation();
         }
     }
 
@@ -1536,21 +1880,20 @@ public class PanamaAdapter implements DualApi {
             return hyperscan.HS_INVALID();
         }
         PanamaStream s = (PanamaStream) stream;
-        if (s.closed) {
+        if (s.isClosed()) {
             return hyperscan.HS_INVALID();
         }
-        s.closed = true;
         MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
         if (handler != null) {
             setHandlerContext(handler, s.expressionsById);
         }
         try {
-            return hyperscan.hs_close_stream(s.stream, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
+            return propagateHandlerFailure(s.closeNative(
+                    scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, true));
         } finally {
             if (handler != null) {
                 clearHandlerContext();
             }
-            hyperscan.hs_free_scratch(s.scratch);
         }
     }
 
@@ -1560,16 +1903,28 @@ public class PanamaAdapter implements DualApi {
             return hyperscan.HS_INVALID();
         }
         PanamaStream s = (PanamaStream) stream;
-        MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
-        if (handler != null) {
-            setHandlerContext(handler, s.expressionsById);
+        MemorySegment nativeStream;
+        try {
+            nativeStream = s.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID();
         }
         try {
-            return hyperscan.hs_reset_stream(s.stream, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-        } finally {
+            MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
             if (handler != null) {
-                clearHandlerContext();
+                setHandlerContext(handler, s.expressionsById);
             }
+            try {
+                return propagateHandlerFailure(hyperscan.hs_reset_stream(
+                        nativeStream, 0, scratch,
+                        handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
+            }
+        } finally {
+            s.endOperation();
         }
     }
 
@@ -1579,16 +1934,41 @@ public class PanamaAdapter implements DualApi {
             return hyperscan.HS_INVALID();
         }
         PanamaStream src = (PanamaStream) from;
-        MemorySegment toOut = zeroAddressOut(HS_LIBRARY_ARENA);
+        MemorySegment source;
         try {
-            int result = hyperscan.hs_copy_stream(toOut, src.stream);
-            if (result == 0) {
-                MemorySegment copied = reinterpretHandle(toOut.get(ValueLayout.ADDRESS, 0));
-                to[0] = new PanamaStream(copied, MemorySegment.NULL, src.expressions);
+            source = src.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID();
+        }
+        try {
+            acquireDatabaseStreamLease(src.databaseOwner);
+            boolean transferred = false;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment toOut = zeroAddressOut(arena);
+                try {
+                    int result = hyperscan.hs_copy_stream(toOut, source);
+                    if (result == 0) {
+                        MemorySegment copied = reinterpretHandle(toOut.get(ValueLayout.ADDRESS, 0));
+                        try {
+                            to[0] = new PanamaStream(copied, null, src.expressions, src.databaseOwner);
+                            transferred = true;
+                        } catch (RuntimeException | Error e) {
+                            hyperscan.hs_close_stream(
+                                    copied, MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL);
+                            throw e;
+                        }
+                    }
+                    return result;
+                } catch (Throwable e) {
+                    throw new RuntimeException(e);
+                }
+            } finally {
+                if (!transferred) {
+                    releaseDatabaseStreamLease(src.databaseOwner);
+                }
             }
-            return result;
-        } catch (Throwable e) {
-            throw new RuntimeException(e);
+        } finally {
+            src.endOperation();
         }
     }
 
@@ -1602,15 +1982,38 @@ public class PanamaAdapter implements DualApi {
         }
         PanamaStream toStream = (PanamaStream) to;
         PanamaStream fromStream = (PanamaStream) from;
-        MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
-        if (handler != null) {
-            setHandlerContext(handler, toStream.expressionsById);
+        MemorySegment destination;
+        try {
+            destination = toStream.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID();
+        }
+        MemorySegment source;
+        try {
+            source = fromStream.beginOperation();
+        } catch (IllegalStateException e) {
+            toStream.endOperation();
+            return hyperscan.HS_INVALID();
         }
         try {
-            return hyperscan.hs_reset_and_copy_stream(toStream.stream, fromStream.stream, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-        } finally {
+            MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
             if (handler != null) {
-                clearHandlerContext();
+                setHandlerContext(handler, toStream.expressionsById);
+            }
+            try {
+                return propagateHandlerFailure(hyperscan.hs_reset_and_copy_stream(
+                        destination, source, scratch,
+                        handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
+            }
+        } finally {
+            try {
+                fromStream.endOperation();
+            } finally {
+                toStream.endOperation();
             }
         }
     }
@@ -1620,21 +2023,25 @@ public class PanamaAdapter implements DualApi {
         if (database == null) {
             return hyperscan.HS_INVALID();
         }
-        MemorySegment db = nativeDatabase(database);
-        MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
-        List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
-        if (handler != null) {
-            setHandlerContext(handler, buildExpressionLookup(expressions));
-        }
-        try {
-            try (Arena arena = Arena.ofConfined()) {
-                MemorySegment data = input == null ? MemorySegment.NULL : allocateBytes(arena, input);
-                int length = input == null ? 4 : input.length;
-                return hyperscan.hs_scan(db, data, length, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-            }
-        } finally {
+        try (PanamaDatabaseOperation operation = acquireDatabaseOperation(database)) {
+            MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
+            List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb
+                    ? nativeDb.expressions() : List.of();
             if (handler != null) {
-                clearHandlerContext();
+                setHandlerContext(handler, buildExpressionLookup(expressions));
+            }
+            try {
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment data = input == null ? MemorySegment.NULL : allocateBytes(arena, input);
+                    int length = input == null ? 4 : input.length;
+                    return propagateHandlerFailure(hyperscan.hs_scan(
+                            operation.database, data, length, 0, scratch,
+                            handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+                }
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
             }
         }
     }
@@ -1644,30 +2051,38 @@ public class PanamaAdapter implements DualApi {
         if (database == null) {
             return hyperscan.HS_INVALID();
         }
-        MemorySegment db = nativeDatabase(database);
-        MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
-        List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
-        if (handler != null) {
-            setHandlerContext(handler, buildExpressionLookup(expressions));
-        }
-        try {
-            try (Arena arena = Arena.ofConfined()) {
-                if (input == null) {
-                    return hyperscan.hs_scan_vector(db, MemorySegment.NULL, MemorySegment.NULL, 2, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-                }
-                MemorySegment dataPtrs = arena.allocate(input.length * ValueLayout.ADDRESS.byteSize());
-                MemorySegment lengths = arena.allocate(input.length * ValueLayout.JAVA_INT.byteSize());
-                for (int i = 0; i < input.length; i++) {
-                    byte[] data = input[i];
-                    MemorySegment dataSeg = data == null ? MemorySegment.NULL : allocateBytes(arena, data);
-                    dataPtrs.setAtIndex(ValueLayout.ADDRESS, i, dataSeg);
-                    lengths.setAtIndex(ValueLayout.JAVA_INT, i, data == null ? 4 : data.length);
-                }
-                return hyperscan.hs_scan_vector(db, dataPtrs, lengths, input.length, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-            }
-        } finally {
+        try (PanamaDatabaseOperation operation = acquireDatabaseOperation(database)) {
+            MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
+            List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb
+                    ? nativeDb.expressions() : List.of();
             if (handler != null) {
-                clearHandlerContext();
+                setHandlerContext(handler, buildExpressionLookup(expressions));
+            }
+            try {
+                try (Arena arena = Arena.ofConfined()) {
+                    if (input == null) {
+                        return propagateHandlerFailure(hyperscan.hs_scan_vector(
+                                operation.database, MemorySegment.NULL, MemorySegment.NULL,
+                                2, 0, scratch,
+                                handler == null ? MemorySegment.NULL : MATCH_HANDLER,
+                                MemorySegment.NULL));
+                    }
+                    MemorySegment dataPtrs = arena.allocate(input.length * ValueLayout.ADDRESS.byteSize());
+                    MemorySegment lengths = arena.allocate(input.length * ValueLayout.JAVA_INT.byteSize());
+                    for (int i = 0; i < input.length; i++) {
+                        byte[] data = input[i];
+                        MemorySegment dataSeg = data == null ? MemorySegment.NULL : allocateBytes(arena, data);
+                        dataPtrs.setAtIndex(ValueLayout.ADDRESS, i, dataSeg);
+                        lengths.setAtIndex(ValueLayout.JAVA_INT, i, data == null ? 4 : data.length);
+                    }
+                    return propagateHandlerFailure(hyperscan.hs_scan_vector(
+                            operation.database, dataPtrs, lengths, input.length, 0, scratch,
+                            handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+                }
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
             }
         }
     }
@@ -1677,28 +2092,37 @@ public class PanamaAdapter implements DualApi {
         if (database == null) {
             return hyperscan.HS_INVALID();
         }
-        MemorySegment db = nativeDatabase(database);
-        MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
-        List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb ? nativeDb.expressions() : List.of();
-        if (handler != null) {
-            setHandlerContext(handler, buildExpressionLookup(expressions));
-        }
-        try {
-            try (Arena arena = Arena.ofConfined()) {
-                if (input == null) {
-                    return hyperscan.hs_scan_vector(db, MemorySegment.NULL, MemorySegment.NULL, 2, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-                }
-                MemorySegment dataPtrs = arena.allocate(input.length * ValueLayout.ADDRESS.byteSize());
-                for (int i = 0; i < input.length; i++) {
-                    byte[] data = input[i];
-                    MemorySegment dataSeg = data == null ? MemorySegment.NULL : allocateBytes(arena, data);
-                    dataPtrs.setAtIndex(ValueLayout.ADDRESS, i, dataSeg);
-                }
-                return hyperscan.hs_scan_vector(db, dataPtrs, MemorySegment.NULL, input.length, 0, scratch, handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL);
-            }
-        } finally {
+        try (PanamaDatabaseOperation operation = acquireDatabaseOperation(database)) {
+            MemorySegment scratch = scanner == null ? MemorySegment.NULL : nativeScratch(scanner);
+            List<DualExpression> expressions = database instanceof PanamaNativeDatabase nativeDb
+                    ? nativeDb.expressions() : List.of();
             if (handler != null) {
-                clearHandlerContext();
+                setHandlerContext(handler, buildExpressionLookup(expressions));
+            }
+            try {
+                try (Arena arena = Arena.ofConfined()) {
+                    if (input == null) {
+                        return propagateHandlerFailure(hyperscan.hs_scan_vector(
+                                operation.database, MemorySegment.NULL, MemorySegment.NULL,
+                                2, 0, scratch,
+                                handler == null ? MemorySegment.NULL : MATCH_HANDLER,
+                                MemorySegment.NULL));
+                    }
+                    MemorySegment dataPtrs = arena.allocate(input.length * ValueLayout.ADDRESS.byteSize());
+                    for (int i = 0; i < input.length; i++) {
+                        byte[] data = input[i];
+                        MemorySegment dataSeg = data == null ? MemorySegment.NULL : allocateBytes(arena, data);
+                        dataPtrs.setAtIndex(ValueLayout.ADDRESS, i, dataSeg);
+                    }
+                    return propagateHandlerFailure(hyperscan.hs_scan_vector(
+                            operation.database, dataPtrs, MemorySegment.NULL,
+                            input.length, 0, scratch,
+                            handler == null ? MemorySegment.NULL : MATCH_HANDLER, MemorySegment.NULL));
+                }
+            } finally {
+                if (handler != null) {
+                    clearHandlerContext();
+                }
             }
         }
     }
@@ -1724,7 +2148,17 @@ public class PanamaAdapter implements DualApi {
         if (database == null) {
             return hyperscan.HS_SUCCESS();
         }
-        return hyperscan.hs_free_database(nativeDatabase(database));
+        if (database instanceof PanamaNativeDatabase nativeDb) {
+            return nativeDb.free();
+        }
+        if (database instanceof PanamaRawDatabase) {
+            return hyperscan.HS_INVALID();
+        }
+        if (database instanceof PanamaDatabase wrapper) {
+            wrapper.close();
+            return hyperscan.HS_SUCCESS();
+        }
+        return hyperscan.HS_INVALID();
     }
 
     @Override
@@ -1732,7 +2166,10 @@ public class PanamaAdapter implements DualApi {
         if (scanner == null) {
             return hyperscan.HS_SUCCESS();
         }
-        return hyperscan.hs_free_scratch(nativeScratch(scanner));
+        if (scanner instanceof PanamaRawScanner raw) {
+            return raw.free();
+        }
+        return hyperscan.HS_INVALID();
     }
 
     @Override
@@ -1765,15 +2202,18 @@ public class PanamaAdapter implements DualApi {
             MemorySegment errOut = nullErr ? MemorySegment.NULL : zeroAddressOut(arena);
             int result = hyperscan.hs_expression_info(expr, toFlagBits(flags), infoOut, errOut);
             MemorySegment err = nullErr ? MemorySegment.NULL : (result == 0 ? MemorySegment.NULL : reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0)));
-            String message = readCompileErrorMessage(err);
-            if (err != null && err != MemorySegment.NULL) {
-                hyperscan.hs_free_compile_error(err);
-            }
             MemorySegment info = nullInfo ? MemorySegment.NULL : reinterpretString(infoOut.get(ValueLayout.ADDRESS, 0));
-            if (info != null && info != MemorySegment.NULL) {
-                freeSegment(info);
+            try {
+                return new DualResult<>(result, null, readCompileErrorMessage(err));
+            } finally {
+                try {
+                    if (err != null && err.address() != 0) {
+                        hyperscan.hs_free_compile_error(err);
+                    }
+                } finally {
+                    freeMiscSegment(info);
+                }
             }
-            return new DualResult<>(result, null, message);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -1801,15 +2241,18 @@ public class PanamaAdapter implements DualApi {
             MemorySegment errOut = nullErr ? MemorySegment.NULL : zeroAddressOut(arena);
             int result = hyperscan.hs_expression_ext_info(expr, toFlagBits(flags), MemorySegment.NULL, infoOut, errOut);
             MemorySegment err = nullErr ? MemorySegment.NULL : (result == 0 ? MemorySegment.NULL : reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0)));
-            String message = readCompileErrorMessage(err);
-            if (err != null && err != MemorySegment.NULL) {
-                hyperscan.hs_free_compile_error(err);
-            }
             MemorySegment info = nullInfo ? MemorySegment.NULL : reinterpretString(infoOut.get(ValueLayout.ADDRESS, 0));
-            if (info != null && info != MemorySegment.NULL) {
-                freeSegment(info);
+            try {
+                return new DualResult<>(result, null, readCompileErrorMessage(err));
+            } finally {
+                try {
+                    if (err != null && err.address() != 0) {
+                        hyperscan.hs_free_compile_error(err);
+                    }
+                } finally {
+                    freeMiscSegment(info);
+                }
             }
-            return new DualResult<>(result, null, message);
         }
     }
 
@@ -1830,22 +2273,27 @@ public class PanamaAdapter implements DualApi {
             MemorySegment errOut = nullErr ? MemorySegment.NULL : zeroAddressOut(arena);
             int result = hyperscan.hs_expression_info(expr, toFlagBits(flags), infoOut, errOut);
             MemorySegment err = nullErr ? MemorySegment.NULL : (result == 0 ? MemorySegment.NULL : reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0)));
-            String message = readCompileErrorMessage(err);
-            if (err != null && err != MemorySegment.NULL) {
-                hyperscan.hs_free_compile_error(err);
-            }
             MemorySegment info = reinterpretExprInfo(infoOut.get(ValueLayout.ADDRESS, 0));
-            DualExpressionInfo value = null;
-            if (result == 0 && info != null && info != MemorySegment.NULL) {
-                value = new DualExpressionInfo(
-                        Integer.toUnsignedLong(hs_expr_info.min_width(info)),
-                        Integer.toUnsignedLong(hs_expr_info.max_width(info)),
-                        hs_expr_info.unordered_matches(info) != 0,
-                        hs_expr_info.matches_at_eod(info) != 0,
-                        hs_expr_info.matches_only_at_eod(info) != 0);
-                freeSegment(info);
+            try {
+                DualExpressionInfo value = null;
+                if (result == 0 && info != null && info.address() != 0) {
+                    value = new DualExpressionInfo(
+                            Integer.toUnsignedLong(hs_expr_info.min_width(info)),
+                            Integer.toUnsignedLong(hs_expr_info.max_width(info)),
+                            hs_expr_info.unordered_matches(info) != 0,
+                            hs_expr_info.matches_at_eod(info) != 0,
+                            hs_expr_info.matches_only_at_eod(info) != 0);
+                }
+                return new DualResult<>(result, value, readCompileErrorMessage(err));
+            } finally {
+                try {
+                    if (err != null && err.address() != 0) {
+                        hyperscan.hs_free_compile_error(err);
+                    }
+                } finally {
+                    freeMiscSegment(info);
+                }
             }
-            return new DualResult<>(result, value, message);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -1863,22 +2311,27 @@ public class PanamaAdapter implements DualApi {
             MemorySegment errOut = nullErr ? MemorySegment.NULL : zeroAddressOut(arena);
             int result = hyperscan.hs_expression_ext_info(expr, toFlagBits(flags), extSeg, infoOut, errOut);
             MemorySegment err = nullErr ? MemorySegment.NULL : (result == 0 ? MemorySegment.NULL : reinterpretCompileError(errOut.get(ValueLayout.ADDRESS, 0)));
-            String message = readCompileErrorMessage(err);
-            if (err != null && err != MemorySegment.NULL) {
-                hyperscan.hs_free_compile_error(err);
-            }
             MemorySegment info = reinterpretExprInfo(infoOut.get(ValueLayout.ADDRESS, 0));
-            DualExpressionInfo value = null;
-            if (result == 0 && info != null && info != MemorySegment.NULL) {
-                value = new DualExpressionInfo(
-                        Integer.toUnsignedLong(hs_expr_info.min_width(info)),
-                        Integer.toUnsignedLong(hs_expr_info.max_width(info)),
-                        hs_expr_info.unordered_matches(info) != 0,
-                        hs_expr_info.matches_at_eod(info) != 0,
-                        hs_expr_info.matches_only_at_eod(info) != 0);
-                freeSegment(info);
+            try {
+                DualExpressionInfo value = null;
+                if (result == 0 && info != null && info.address() != 0) {
+                    value = new DualExpressionInfo(
+                            Integer.toUnsignedLong(hs_expr_info.min_width(info)),
+                            Integer.toUnsignedLong(hs_expr_info.max_width(info)),
+                            hs_expr_info.unordered_matches(info) != 0,
+                            hs_expr_info.matches_at_eod(info) != 0,
+                            hs_expr_info.matches_only_at_eod(info) != 0);
+                }
+                return new DualResult<>(result, value, readCompileErrorMessage(err));
+            } finally {
+                try {
+                    if (err != null && err.address() != 0) {
+                        hyperscan.hs_free_compile_error(err);
+                    }
+                } finally {
+                    freeMiscSegment(info);
+                }
             }
-            return new DualResult<>(result, value, message);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -1894,10 +2347,10 @@ public class PanamaAdapter implements DualApi {
             return getNativeDatabaseHandle(wrapper.database());
         }
         if (database instanceof PanamaNativeDatabase nativeDb) {
-            return nativeDb.database();
+            return nativeDb.requireDatabase();
         }
         if (database instanceof PanamaRawDatabase rawDb) {
-            return rawDb.database();
+            return rawDb.requireDatabase();
         }
         throw new IllegalArgumentException("Unsupported database type: " + database.getClass());
     }
@@ -1938,12 +2391,57 @@ public class PanamaAdapter implements DualApi {
             return MemorySegment.NULL;
         }
         if (scanner instanceof PanamaRawScanner raw) {
-            return raw.scratch();
+            return raw.requireScratch();
         }
         if (scanner instanceof PanamaScanner wrapper) {
-            return getNativeScratchHandle(wrapper.scanner());
+            wrapper.requireOpen();
+            if (wrapper.nativeScratch != null) {
+                return wrapper.nativeScratch.require();
+            }
+            return getNativeScratchHandle(wrapper.scanner);
         }
         throw new IllegalArgumentException("Unsupported scanner type: " + scanner.getClass());
+    }
+
+    private static MemorySegment streamScratch(DualScanner scanner, PanamaStream stream) {
+        return stream.scratchState == null ? nativeScratch(scanner) : stream.scratch();
+    }
+
+    private static PanamaVectorScratch acquireVectorScratch(DualScanner scanner, MemorySegment database) {
+        if (scanner instanceof PanamaScanner wrapper) {
+            return new PanamaVectorScratch(wrapper.reusableNativeScratch(database), false);
+        }
+        if (scanner != null) {
+            return new PanamaVectorScratch(nativeScratch(scanner), false);
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment scratchOut = zeroAddressOut(arena);
+            checkResult(hyperscan.hs_alloc_scratch(database, scratchOut));
+            MemorySegment scratchAddress = scratchOut.get(ValueLayout.ADDRESS, 0);
+            try {
+                return new PanamaVectorScratch(reinterpretHandle(scratchAddress), true);
+            } catch (RuntimeException | Error e) {
+                hyperscan.hs_free_scratch(scratchAddress);
+                throw e;
+            }
+        }
+    }
+
+    private static final class PanamaVectorScratch implements AutoCloseable {
+        private final MemorySegment scratch;
+        private final boolean owner;
+
+        private PanamaVectorScratch(MemorySegment scratch, boolean owner) {
+            this.scratch = scratch;
+            this.owner = owner;
+        }
+
+        @Override
+        public void close() {
+            if (owner) {
+                checkResult(hyperscan.hs_free_scratch(scratch));
+            }
+        }
     }
 
     private static MemorySegment getNativeScratchHandle(Scanner scanner) {
@@ -1962,7 +2460,7 @@ public class PanamaAdapter implements DualApi {
             return MemorySegment.NULL;
         }
         if (stream instanceof PanamaStream s) {
-            return s.stream;
+            return s.requireOpen();
         }
         throw new IllegalArgumentException("Unsupported stream type: " + stream.getClass());
     }
@@ -2015,18 +2513,20 @@ public class PanamaAdapter implements DualApi {
             MemorySegment infoOut = zeroAddressOut(arena);
             checkResult(hyperscan.hs_database_info(database, infoOut));
             MemorySegment info = reinterpretString(infoOut.get(ValueLayout.ADDRESS, 0));
-            String result = info.getString(0);
-            freeSegment(info);
-            return result;
+            try {
+                return info.getString(0);
+            } finally {
+                freeMiscSegment(info);
+            }
         }
     }
 
     private static String readCompileErrorMessage(MemorySegment err) {
-        if (err == null || err == MemorySegment.NULL) {
+        if (err == null || err.address() == 0) {
             return null;
         }
         MemorySegment msg = hs_compile_error.message(err);
-        if (msg == null || msg == MemorySegment.NULL) {
+        if (msg == null || msg.address() == 0) {
             return null;
         }
         return reinterpretString(msg).getString(0);
@@ -2120,100 +2620,396 @@ public class PanamaAdapter implements DualApi {
 
         @Override
         public void close() {
-            database.close();
+            closeDatabaseWhenUnused(this, database::close);
         }
     }
 
-    private record PanamaScanner(Scanner scanner) implements DualScanner {
+    private static final class PanamaScanner implements DualScanner {
+        final Scanner scanner;
+        PanamaScratchState nativeScratch;
+        private boolean closed;
+        private boolean wrapperClosed;
+
+        PanamaScanner(Scanner scanner) {
+            this.scanner = scanner;
+        }
+
+        synchronized void requireOpen() {
+            if (closed) {
+                throw new IllegalStateException("Scanner is already closed");
+            }
+        }
+
+        synchronized MemorySegment ensureNativeScratch(MemorySegment database) {
+            if (closed) {
+                throw new IllegalStateException("Scanner is already closed");
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment scratchOut = zeroAddressOut(arena);
+                scratchOut.set(ValueLayout.ADDRESS, 0,
+                        nativeScratch == null ? MemorySegment.NULL : nativeScratch.require());
+                checkResult(hyperscan.hs_alloc_scratch(database, scratchOut));
+                MemorySegment scratch = reinterpretHandle(scratchOut.get(ValueLayout.ADDRESS, 0));
+                if (nativeScratch == null) {
+                    nativeScratch = new PanamaScratchState(scratch);
+                } else {
+                    nativeScratch.replace(scratch);
+                }
+                return scratch;
+            }
+        }
+
+        synchronized MemorySegment reusableNativeScratch(MemorySegment database) {
+            requireOpen();
+            return nativeScratch == null ? ensureNativeScratch(database) : nativeScratch.require();
+        }
+
         @Override
-        public long getSize() {
+        public synchronized long getSize() {
+            requireOpen();
+            if (nativeScratch != null) {
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment sizeOut = zeroLongOut(arena);
+                    checkResult(hyperscan.hs_scratch_size(nativeScratch.require(), sizeOut));
+                    return sizeOut.get(ValueLayout.JAVA_LONG, 0);
+                }
+            }
             return scanner.getSize();
         }
 
         @Override
-        public void close() {
-            try {
-                scanner.close();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+        public synchronized void close() {
+            if (closed && wrapperClosed && (nativeScratch == null || nativeScratch.isClosed())) {
+                return;
+            }
+            closed = true;
+            RuntimeException failure = null;
+            if (!wrapperClosed) {
+                try {
+                    scanner.close();
+                    wrapperClosed = true;
+                } catch (IOException e) {
+                    failure = new RuntimeException(e);
+                }
+            }
+            if (nativeScratch != null) {
+                try {
+                    checkResult(nativeScratch.free());
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
     }
 
-    private record PanamaNativeDatabase(MemorySegment database, List<DualExpression> expressions) implements DualDatabase {
+    private static final class PanamaNativeDatabase implements DualDatabase {
+        private MemorySegment database;
+        private final List<DualExpression> expressions;
+
+        PanamaNativeDatabase(MemorySegment database, List<DualExpression> expressions) {
+            this.database = database;
+            this.expressions = expressions;
+        }
+
+        List<DualExpression> expressions() {
+            return expressions;
+        }
+
+        synchronized MemorySegment requireDatabase() {
+            if (database == null || database.address() == 0) {
+                throw new IllegalStateException("Database is already closed");
+            }
+            return database;
+        }
+
+        synchronized int free() {
+            return freeDatabaseWhenUnused(this, () -> {
+                if (database == null || database.address() == 0) {
+                    return hyperscan.HS_SUCCESS();
+                }
+                int result = hyperscan.hs_free_database(database);
+                if (result == hyperscan.HS_SUCCESS()) {
+                    database = MemorySegment.NULL;
+                }
+                return result;
+            });
+        }
+
         @Override
         public long getSize() {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment sizeOut = zeroLongOut(arena);
-                checkResult(hyperscan.hs_database_size(database, sizeOut));
+                checkResult(hyperscan.hs_database_size(requireDatabase(), sizeOut));
                 return sizeOut.get(ValueLayout.JAVA_LONG, 0);
             }
         }
 
         @Override
         public void close() {
-            checkResult(hyperscan.hs_free_database(database));
+            checkResult(free());
         }
     }
 
-    private record PanamaRawDatabase(MemorySegment database, MemorySegment memory, Arena arena, boolean owner) implements DualDatabase {
+    private static final class PanamaRawDatabaseState {
+        private MemorySegment memory;
+        private Arena arena;
+
+        PanamaRawDatabaseState(MemorySegment memory, Arena arena) {
+            this.memory = memory;
+            this.arena = arena;
+        }
+
+        synchronized MemorySegment requireMemory() {
+            if (arena == null || !arena.scope().isAlive()) {
+                throw new IllegalStateException("Raw database memory is already closed");
+            }
+            return memory;
+        }
+
+        synchronized void close() {
+            if (arena == null) {
+                return;
+            }
+            arena.close();
+            arena = null;
+            memory = MemorySegment.NULL;
+        }
+    }
+
+    private static final class PanamaRawDatabase implements DualDatabase {
+        private MemorySegment database;
+        final PanamaRawDatabaseState state;
+        private final boolean owner;
+        private boolean closed;
+
+        PanamaRawDatabase(MemorySegment database, PanamaRawDatabaseState state, boolean owner) {
+            this.database = database;
+            this.state = state;
+            this.owner = owner;
+        }
+
+        synchronized MemorySegment requireDatabase() {
+            if (closed || database == null || database.address() == 0) {
+                throw new IllegalStateException("Raw database view is already closed");
+            }
+            state.requireMemory();
+            return database;
+        }
+
         @Override
         public long getSize() {
             try (Arena local = Arena.ofConfined()) {
                 MemorySegment sizeOut = zeroLongOut(local);
-                checkResult(hyperscan.hs_database_size(database, sizeOut));
+                checkResult(hyperscan.hs_database_size(requireDatabase(), sizeOut));
                 return sizeOut.get(ValueLayout.JAVA_LONG, 0);
             }
         }
 
         @Override
-        public void close() {
-            if (owner && arena != null) {
-                arena.close();
+        public synchronized void close() {
+            if (closed) {
+                return;
             }
+            if (owner) {
+                closeDatabaseWhenUnused(this, state::close);
+            }
+            database = MemorySegment.NULL;
+            closed = true;
         }
     }
 
-    private record PanamaRawScanner(MemorySegment scratch) implements DualScanner {
+    private static final class PanamaScratchState {
+        private MemorySegment scratch;
+
+        PanamaScratchState(MemorySegment scratch) {
+            this.scratch = scratch;
+        }
+
+        synchronized MemorySegment require() {
+            if (scratch == null || scratch.address() == 0) {
+                throw new IllegalStateException("Scratch space is already closed");
+            }
+            return scratch;
+        }
+
+        synchronized void replace(MemorySegment replacement) {
+            scratch = replacement;
+        }
+
+        synchronized boolean isClosed() {
+            return scratch == null || scratch.address() == 0;
+        }
+
+        synchronized int free() {
+            if (scratch == null || scratch.address() == 0) {
+                return hyperscan.HS_SUCCESS();
+            }
+            int result = hyperscan.hs_free_scratch(scratch);
+            if (result == hyperscan.HS_SUCCESS()) {
+                scratch = MemorySegment.NULL;
+            }
+            return result;
+        }
+    }
+
+    private static final class PanamaRawScanner implements DualScanner {
+        private final PanamaScratchState state;
+        private final boolean owner;
+
+        PanamaRawScanner(PanamaScratchState state, boolean owner) {
+            this.state = state;
+            this.owner = owner;
+        }
+
+        MemorySegment requireScratch() {
+            return state.require();
+        }
+
+        void replace(MemorySegment scratch) {
+            if (!owner) {
+                throw new IllegalStateException("Cannot replace borrowed scratch");
+            }
+            state.replace(scratch);
+        }
+
+        boolean isOwner() {
+            return owner;
+        }
+
+        int free() {
+            return owner ? state.free() : hyperscan.HS_INVALID();
+        }
+
         @Override
         public long getSize() {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment sizeOut = zeroLongOut(arena);
-                checkResult(hyperscan.hs_scratch_size(scratch, sizeOut));
+                checkResult(hyperscan.hs_scratch_size(requireScratch(), sizeOut));
                 return sizeOut.get(ValueLayout.JAVA_LONG, 0);
             }
         }
 
         @Override
         public void close() {
-            checkResult(hyperscan.hs_free_scratch(scratch));
+            if (owner) {
+                checkResult(state.free());
+            }
         }
     }
 
     private static final class PanamaStream implements DualStream {
-        final MemorySegment stream;
-        final MemorySegment scratch;
+        private MemorySegment stream;
+        final PanamaScratchState scratchState;
         final List<DualExpression> expressions;
         final DualExpression[] expressionsById;
-        boolean closed;
+        final DualDatabase databaseOwner;
+        private boolean closed;
+        private boolean operationInProgress;
+        private boolean leaseReleased;
 
-        PanamaStream(MemorySegment stream, MemorySegment scratch, List<DualExpression> expressions) {
+        PanamaStream(MemorySegment stream, PanamaScratchState scratchState,
+                     List<DualExpression> expressions, DualDatabase databaseOwner) {
             this.stream = stream;
-            this.scratch = scratch;
+            this.scratchState = scratchState;
             this.expressions = expressions;
             this.expressionsById = buildExpressionLookup(expressions);
+            this.databaseOwner = databaseOwner;
+        }
+
+        MemorySegment scratch() {
+            return scratchState == null ? MemorySegment.NULL : scratchState.require();
+        }
+
+        synchronized MemorySegment requireOpen() {
+            if (closed || stream == null || stream.address() == 0) {
+                throw new IllegalStateException("Stream is already closed");
+            }
+            return stream;
+        }
+
+        synchronized MemorySegment beginOperation() {
+            MemorySegment current = requireOpen();
+            if (operationInProgress) {
+                throw new IllegalStateException("Stream is in use by an active operation");
+            }
+            operationInProgress = true;
+            return current;
+        }
+
+        synchronized void endOperation() {
+            if (!operationInProgress) {
+                throw new IllegalStateException("Stream operation lease is not held");
+            }
+            operationInProgress = false;
+        }
+
+        synchronized boolean isClosed() {
+            return closed;
+        }
+
+        private void finishCleanup() {
+            RuntimeException failure = null;
+            if (scratchState != null) {
+                try {
+                    checkResult(scratchState.free());
+                } catch (RuntimeException e) {
+                    failure = e;
+                }
+            }
+            if (!leaseReleased) {
+                try {
+                    releaseDatabaseStreamLease(databaseOwner);
+                    leaseReleased = true;
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        synchronized int closeNative(MemorySegment callbackScratch, MemorySegment handler,
+                                     boolean invalidWhenClosed) {
+            if (closed) {
+                finishCleanup();
+                return invalidWhenClosed ? hyperscan.HS_INVALID() : hyperscan.HS_SUCCESS();
+            }
+            if (operationInProgress) {
+                return hyperscan.HS_INVALID();
+            }
+            operationInProgress = true;
+            try {
+                int result = hyperscan.hs_close_stream(stream, callbackScratch, handler, MemorySegment.NULL);
+                if (result != hyperscan.HS_INVALID() && result != hyperscan.HS_SCRATCH_IN_USE()) {
+                    closed = true;
+                    stream = MemorySegment.NULL;
+                    finishCleanup();
+                }
+                return result;
+            } finally {
+                operationInProgress = false;
+            }
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
             if (closed) {
+                finishCleanup();
                 return;
             }
-            closed = true;
-            checkResult(hyperscan.hs_close_stream(stream, scratch == null ? MemorySegment.NULL : scratch, MemorySegment.NULL, MemorySegment.NULL));
-            if (scratch != null && scratch != MemorySegment.NULL) {
-                checkResult(hyperscan.hs_free_scratch(scratch));
-            }
+            checkResult(closeNative(scratch(), MemorySegment.NULL, false));
         }
     }
 

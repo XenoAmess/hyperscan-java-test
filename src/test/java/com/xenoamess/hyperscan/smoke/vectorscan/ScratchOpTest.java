@@ -42,6 +42,7 @@ class ScratchOpTest {
             DualScratchResult scratchResult2 = api.allocScratchRaw(db2, scanner);
             assertThat(scratchResult2.code()).isEqualTo(api.success());
             DualScanner scanner2 = scratchResult2.scratch();
+            assertThat(scanner2).isSameAs(scanner);
             int success = api.scanRaw(scanner2, db2, data, DUMMY);
             assertThat(success).isEqualTo(api.success());
             assertThat(api.freeScratchRaw(scanner2)).isEqualTo(api.success());
@@ -75,6 +76,7 @@ class ScratchOpTest {
                 DualScratchResult scratchResult2 = api.allocScratchRaw(db2, scanner);
                 assertThat(scratchResult2.code()).isEqualTo(api.success());
                 DualScanner scanner2 = scratchResult2.scratch();
+                assertThat(scanner2).isSameAs(scanner);
                 int success = api.scanStreamRaw(stream, data, scanner2, DUMMY);
                 assertThat(success).isEqualTo(api.success());
                 assertThat(api.closeStreamRaw(stream, null, null)).isEqualTo(api.success());

@@ -7,7 +7,7 @@ from html import escape
 from datetime import datetime, timezone
 
 
-FIXED_WORKLOAD_SCENARIO = 'ISA granularity benchmark'
+FIXED_WORKLOAD_SCENARIO = 'ISA fixed workload (direct buffer)'
 
 
 def load_results(input_dir):
@@ -79,27 +79,27 @@ def find_benchmark(result, scenario_name):
 def throughput_for(result, scenario_name):
     bench = find_benchmark(result, scenario_name)
     if bench:
-        value = safe_get(bench, 'metrics', 'throughputMBpsAvg', default=None)
+        value = safe_get(bench, 'metrics', 'throughputMiBpsAvg', default=None)
         if value is None:
-            value = safe_get(bench, 'metrics', 'throughputMBps', default=0.0)
-        return float(value or 0.0)
-    return 0.0
+            value = safe_get(bench, 'metrics', 'throughputMiBps', default=None)
+        return float(value) if value is not None else None
+    return None
 
 
 def ops_per_second_for(result, scenario_name):
     bench = find_benchmark(result, scenario_name)
     if bench:
-        value = safe_get(bench, 'metrics', 'opsPerSecond', default=0.0)
-        return float(value or 0.0)
-    return 0.0
+        value = safe_get(bench, 'metrics', 'opsPerSecond', default=None)
+        return float(value) if value is not None else None
+    return None
 
 
 def value_for(result, scenario_name):
     tp = throughput_for(result, scenario_name)
-    if tp > 0:
-        return tp, 'MB/s'
+    if tp is not None and tp > 0:
+        return tp, 'MiB/s'
     ops = ops_per_second_for(result, scenario_name)
-    return ops, 'ops/s'
+    return (ops, 'ops/s') if ops is not None else (None, None)
 
 
 def fixed_workload_scenario(results):
@@ -113,7 +113,7 @@ def fixed_workload_scenario(results):
         return FIXED_WORKLOAD_SCENARIO
     for name in sorted(names):
         for r in results:
-            if safe_get(find_benchmark(r, name), 'metrics', 'throughputMBpsAvg'):
+            if safe_get(find_benchmark(r, name), 'metrics', 'throughputMiBpsAvg'):
                 return name
     return sorted(names)[0] if names else None
 
@@ -132,10 +132,13 @@ PLATFORM_ORDER = [
     'linux-x86_64',
     'linux-x86_64-avx2',
     'linux-x86_64-baseline',
+    'linux-x86_64-upstream-auto',
     'linux-arm64',
     'linux-arm64-baseline',
+    'linux-arm64-upstream-auto',
     'windows-x86_64',
     'windows-x86_64-baseline',
+    'windows-x86_64-upstream-auto',
 ]
 
 
@@ -158,20 +161,23 @@ def build_platform_rows(results, scenario_name):
         by_platform.setdefault(platform, {})[impl] = r
 
     rows = []
-    unit = 'MB/s'
+    unit = 'MiB/s'
     for platform, impls in by_platform.items():
         upstream = impls.get('upstream')
         upstream_unsupported = is_unsupported(upstream) if upstream else False
-        javacpp_value, javacpp_unit = value_for(impls.get('javacpp'), scenario_name) if impls.get('javacpp') else (0.0, 'MB/s')
-        panama_value, panama_unit = value_for(impls.get('panama'), scenario_name) if impls.get('panama') else (0.0, 'MB/s')
-        upstream_value, upstream_unit = value_for(upstream, scenario_name) if upstream and not upstream_unsupported else (0.0, 'MB/s')
-        if javacpp_value > 0:
+        javacpp_result = impls.get('javacpp')
+        panama_result = impls.get('panama')
+        javacpp_value, javacpp_unit = value_for(javacpp_result, scenario_name) if javacpp_result else (None, None)
+        panama_value, panama_unit = value_for(panama_result, scenario_name) if panama_result else (None, None)
+        upstream_value, upstream_unit = value_for(upstream, scenario_name) if upstream and not upstream_unsupported else (None, None)
+        if javacpp_value is not None and javacpp_value > 0:
             unit = javacpp_unit
-        elif panama_value > 0:
+        elif panama_value is not None and panama_value > 0:
             unit = panama_unit
-        elif upstream_value > 0:
+        elif upstream_value is not None and upstream_value > 0:
             unit = upstream_unit
-        best_tp = max(javacpp_value, panama_value, upstream_value)
+        best_tp = max((value for value in (javacpp_value, panama_value, upstream_value)
+                       if value is not None), default=0)
         stale_ts = None
         for impl_name in ('javacpp', 'panama', 'upstream'):
             r = impls.get(impl_name)
@@ -183,6 +189,9 @@ def build_platform_rows(results, scenario_name):
             'panama': panama_value,
             'upstream': upstream_value,
             'upstream_unsupported': upstream_unsupported,
+            'javacpp_stale': is_stale(javacpp_result) if javacpp_result else False,
+            'panama_stale': is_stale(panama_result) if panama_result else False,
+            'upstream_stale': is_stale(upstream) if upstream else False,
             'stale': stale_ts is not None or any(is_stale(impls.get(name)) for name in ('javacpp', 'panama', 'upstream') if impls.get(name)),
             'stale_timestamp': stale_ts,
             'bestThroughput': best_tp,
@@ -239,7 +248,7 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
     svg.append(f'  <rect width="{width}" height="{height}" fill="#f6f8fa" rx="6" />')
     svg.append(f'  <text x="{width / 2}" y="30" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#1f2328">Hyperscan Java Native Performance Summary</text>')
 
-    subtitle = f"Native {native_version}  ·  {len(rows)} platforms  ·  {scenario_name}  ·  commit {commit_short}"
+    subtitle = f"{scenario_name}  ·  Native {native_version}  ·  {len(rows)} platforms  ·  visual scale only; hosts may differ  ·  commit {commit_short}"
     svg.append(f'  <text x="{width / 2}" y="52" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#656d76">{escape(subtitle)}</text>')
 
     legend_x = left_margin
@@ -259,18 +268,12 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
         javacpp_tp = row['javacpp']
         panama_tp = row['panama']
         upstream_tp = row['upstream']
-        javacpp_width = (javacpp_tp / max_tp) * chart_width
-        panama_width = (panama_tp / max_tp) * chart_width
-        upstream_width = (upstream_tp / max_tp) * chart_width
+        javacpp_width = ((javacpp_tp or 0) / max_tp) * chart_width
+        panama_width = ((panama_tp or 0) / max_tp) * chart_width
+        upstream_width = ((upstream_tp or 0) / max_tp) * chart_width
 
         label_y = group_y + (bar_height * 3 + bar_gap * 2) / 2 + 4
-        stale_suffix = ''
-        if row['stale']:
-            stale_suffix = ' †'
-            ts = row.get('stale_timestamp')
-            if isinstance(ts, str) and len(ts) >= 10:
-                stale_suffix += ts[5:10]
-        svg.append(f'  <text x="{left_margin - 10}" y="{label_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="end" fill="#24292f">{escape(platform + stale_suffix)}</text>')
+        svg.append(f'  <text x="{left_margin - 10}" y="{label_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" text-anchor="end" fill="#24292f">{escape(platform)}</text>')
 
         svg.append(f'  <rect x="{left_margin}" y="{group_y}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
         svg.append(f'  <rect x="{left_margin}" y="{group_y + bar_height + bar_gap}" width="{chart_width}" height="{bar_height}" fill="#e1e4e8" rx="4" />')
@@ -284,14 +287,18 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
             svg.append(f'  <rect x="{left_margin}" y="{group_y + (bar_height + bar_gap) * 2}" width="{upstream_width:.1f}" height="{bar_height}" fill="url(#upstreamGradient)" rx="4" />')
 
         javacpp_value_y = group_y + bar_height / 2 + 4
-        javacpp_value_text = f'{format_num(javacpp_tp)} {unit}'
+        javacpp_value_text = ('N/A' if javacpp_tp is None else f'{format_num(javacpp_tp)} {unit}')
+        if row['javacpp_stale']:
+            javacpp_value_text += ' †'
         javacpp_value_x = left_margin + min(javacpp_width, chart_width) + 6
         if javacpp_width + 85 > chart_width:
             javacpp_value_x = left_margin + chart_width + 6
         svg.append(f'  <text x="{javacpp_value_x}" y="{javacpp_value_y}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#1a7f37">{escape(javacpp_value_text)}</text>')
 
         panama_value_y = group_y + bar_height + bar_gap + bar_height / 2 + 4
-        panama_value_text = f'{format_num(panama_tp)} {unit}'
+        panama_value_text = ('N/A' if panama_tp is None else f'{format_num(panama_tp)} {unit}')
+        if row['panama_stale']:
+            panama_value_text += ' †'
         panama_value_x = left_margin + min(panama_width, chart_width) + 6
         if panama_width + 85 > chart_width:
             panama_value_x = left_margin + chart_width + 6
@@ -301,7 +308,9 @@ def generate_svg(results, output_file, native_version, commit_sha, scenario_name
         if row['upstream_unsupported']:
             upstream_value_text = 'unsupported'
         else:
-            upstream_value_text = f'{format_num(upstream_tp)} {unit}'
+            upstream_value_text = ('N/A' if upstream_tp is None else f'{format_num(upstream_tp)} {unit}')
+            if row['upstream_stale']:
+                upstream_value_text += ' †'
         upstream_value_x = left_margin + min(upstream_width, chart_width) + 6
         if upstream_width + 85 > chart_width:
             upstream_value_x = left_margin + chart_width + 6

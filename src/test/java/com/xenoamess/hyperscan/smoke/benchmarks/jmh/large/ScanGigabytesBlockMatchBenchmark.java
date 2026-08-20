@@ -17,6 +17,7 @@ import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
+import org.openjdk.jmh.annotations.OperationsPerInvocation;
 import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
@@ -93,6 +94,7 @@ public class ScanGigabytesBlockMatchBenchmark {
     }
 
     @Benchmark
+    @OperationsPerInvocation(1000)
     public long scan(BenchmarkState state) {
         long[] counter = new long[1];
         DualByteMatchHandler handler = (expr, from, to) -> {
@@ -106,14 +108,10 @@ public class ScanGigabytesBlockMatchBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.caseIndex = Integer.parseInt(runResult.getParams().getParam("caseIndex"));
-        state.setUp();
-        BehaviourTest.HugeScanCase params = BehaviourTest.GIGABYTE_CASES.get(state.caseIndex);
-        String name = "scanGigabytesBlockMatch_" + BenchmarkData.sanitizePattern(params.pattern());
-        BenchmarkResult result = BenchmarkResultConverter.singleShotLarge(
-                name, runResult.getPrimaryResult(), state.block.capacity(), state.matches, 1000);
-        state.tearDown();
-        return result;
+        int caseIndex = Integer.parseInt(runResult.getParams().getParam("caseIndex"));
+        BehaviourTest.HugeScanCase params = BehaviourTest.GIGABYTE_CASES.get(caseIndex);
+        String name = "scanGibibyteBlockMatch_" + BenchmarkData.sanitizePattern(params.pattern());
+        return BenchmarkResultConverter.singleShotLarge(
+                name, runResult.getPrimaryResult(), 1024L * 1024L, null, 1000);
     }
 }

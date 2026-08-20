@@ -2,6 +2,8 @@
 
 > 时间：2026-07-17
 > 目标：在 `hyperscan-java-test` 的性能报告中追加第三个对比实现 —— 原版 `com.gliwka.hyperscan:native`，要求 7 档 CPU/平台矩阵每档都有对应对比，原版不支持的档位明确输出 `unsupported`。
+>
+> 2026-08 修订：本文保留最初实施记录。当前 CI 每个 Linux 架构只运行一次 `*-upstream-auto`，不再把同一个 auto-dispatch artifact 复制成多个 ISA tier；upstream 与跨 hosted-runner 数据均不参与 Faster/Speedup 排名，吞吐单位统一为 `MiB/s`。
 
 ---
 
@@ -45,7 +47,7 @@
 
 - `generate-performance-report.py`：
   - `build_platform_summary` 纳入 upstream（含 unsupported 标记读取）
-  - 固定档表格加 `Upstream (MB/s)` 列；unsupported 单元格显示 muted "unsupported"
+  - 固定档表格加 `Upstream (MiB/s)` 列；unsupported 单元格显示 muted "unsupported"
   - Faster=三者最优，Speedup=最优/次优（跳过 unsupported）
   - 三系列条形图（Upstream 灰 #6a737d），unsupported 平台显示文字不画条
   - per-platform details 循环 3 实现，unsupported 显示原因行

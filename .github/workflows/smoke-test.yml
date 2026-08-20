@@ -2,7 +2,7 @@ name: smoke-test
 
 on:
   push:
-    branches: [master]
+    branches: [master, 'release/**']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -13,6 +13,11 @@ on:
         description: 'Comma-separated platform subset to run (empty = full matrix, e.g. "linux-x86_64,linux-arm64")'
         required: false
         default: ''
+      largeBenchmarks:
+        description: 'Run multi-GiB JMH scenarios (manual runs only)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,13 +41,13 @@ jobs:
           python3 - <<'EOF'
           import json, os
           full = [
-              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64-baseline"},
-              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64-avx2"},
-              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64"},
-              {"os": "linux", "runner": "ubuntu-24.04-arm", "platform": "linux-arm64-baseline"},
-              {"os": "linux", "runner": "ubuntu-24.04-arm", "platform": "linux-arm64"},
-              {"os": "windows", "runner": "windows-latest", "platform": "windows-x86_64-baseline"},
-              {"os": "windows", "runner": "windows-latest", "platform": "windows-x86_64"},
+              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64-baseline", "panamaClassifier": "linux-x86_64"},
+              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64-avx2", "panamaClassifier": "linux-x86_64"},
+              {"os": "linux", "runner": "ubuntu-24.04", "platform": "linux-x86_64", "panamaClassifier": "linux-x86_64"},
+              {"os": "linux", "runner": "ubuntu-24.04-arm", "platform": "linux-arm64-baseline", "panamaClassifier": "linux-arm64"},
+              {"os": "linux", "runner": "ubuntu-24.04-arm", "platform": "linux-arm64", "panamaClassifier": "linux-arm64"},
+              {"os": "windows", "runner": "windows-latest", "platform": "windows-x86_64-baseline", "panamaClassifier": "windows-x86_64"},
+              {"os": "windows", "runner": "windows-latest", "platform": "windows-x86_64", "panamaClassifier": "windows-x86_64"},
           ]
           wanted = [p.strip() for p in os.environ.get("PLATFORMS", "").split(",") if p.strip()]
           if wanted:
@@ -167,33 +172,8 @@ jobs:
           Write-Host "CPU model: $model"
 
       - name: Check CPU support for ${{ matrix.platform }}
-        if: matrix.os == 'linux'
         id: cpu-check
-        run: |
-          PLATFORM="${{ matrix.platform }}"
-          case "$PLATFORM" in
-            linux-x86_64)
-              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx512f'; then
-                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
-                echo "MISSING_FEATURE=avx512f" >> "$GITHUB_OUTPUT"
-                echo "::warning::CPU does not support AVX-512; flagging for retry."
-              fi
-              ;;
-            linux-x86_64-avx2)
-              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx2'; then
-                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
-                echo "MISSING_FEATURE=avx2" >> "$GITHUB_OUTPUT"
-                echo "::warning::CPU does not support AVX2; flagging for retry."
-              fi
-              ;;
-            linux-arm64)
-              if ! grep -m1 '^Features' /proc/cpuinfo | grep -qw 'sve2'; then
-                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
-                echo "MISSING_FEATURE=sve2" >> "$GITHUB_OUTPUT"
-                echo "::warning::CPU does not support SVE2; flagging for retry."
-              fi
-              ;;
-          esac
+        run: bash .github/scripts/check-cpu-features.sh "${{ matrix.platform }}"
 
       - name: Run smoke tests for ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED != 'true'
@@ -202,8 +182,10 @@ jobs:
           mvn -B -U test \
             -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
             -Djavacpp.platform=${{ matrix.platform }} \
+            -Dorg.bytedeco.javacpp.platform=${{ matrix.platform }} \
+            -Dpanama.native.classifier=${{ matrix.panamaClassifier }} \
+            -Dcom.xenoamess.hyperscan_panama.platform=${{ matrix.platform }} \
             -Dhyperscan.benchmarks.enabled=false \
-            -Dhyperscan.benchmarks.large.enabled=true \
             -Dbenchmark.platform=${{ matrix.platform }}
 
       - name: Skip smoke tests for ${{ matrix.platform }}
@@ -217,6 +199,21 @@ jobs:
         with:
           name: surefire-reports-${{ matrix.platform }}
           path: target/surefire-reports/
+
+      - name: Upload crash logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: smoke-crash-logs-${{ matrix.platform }}
+          path: |
+            hs_err_pid*.log
+            target/surefire-reports/*.dump
+            target/surefire-reports/*.dumpstream
+          if-no-files-found: ignore
+
+      - name: Fail on native or JVM crash diagnostics
+        if: always()
+        run: bash .github/scripts/check-crash-logs.sh
 
   benchmark:
     name: Benchmark ${{ matrix.platform }}
@@ -236,6 +233,7 @@ jobs:
       RUNNER_OS: ${{ matrix.os }}
       CPU_MODEL: unknown
       CPU_FLAGS: unknown
+      LARGE_BENCHMARKS: ${{ inputs.largeBenchmarks || false }}
 
     steps:
       - name: Set runner architecture
@@ -302,33 +300,8 @@ jobs:
           Write-Host "CPU model: $model"
 
       - name: Check CPU support for ${{ matrix.platform }}
-        if: matrix.os == 'linux'
         id: cpu-check
-        run: |
-          PLATFORM="${{ matrix.platform }}"
-          case "$PLATFORM" in
-            linux-x86_64)
-              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx512f'; then
-                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
-                echo "MISSING_FEATURE=avx512f" >> "$GITHUB_OUTPUT"
-                echo "::warning::CPU does not support AVX-512; flagging for retry."
-              fi
-              ;;
-            linux-x86_64-avx2)
-              if ! grep -m1 '^flags' /proc/cpuinfo | grep -qw 'avx2'; then
-                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
-                echo "MISSING_FEATURE=avx2" >> "$GITHUB_OUTPUT"
-                echo "::warning::CPU does not support AVX2; flagging for retry."
-              fi
-              ;;
-            linux-arm64)
-              if ! grep -m1 '^Features' /proc/cpuinfo | grep -qw 'sve2'; then
-                echo "SKIPPED=true" >> "$GITHUB_OUTPUT"
-                echo "MISSING_FEATURE=sve2" >> "$GITHUB_OUTPUT"
-                echo "::warning::CPU does not support SVE2; flagging for retry."
-              fi
-              ;;
-          esac
+        run: bash .github/scripts/check-cpu-features.sh "${{ matrix.platform }}"
 
       - name: Run JMH benchmarks for JAVACPP on ${{ matrix.platform }}
         if: steps.cpu-check.outputs.SKIPPED != 'true'
@@ -338,9 +311,12 @@ jobs:
               -Dtest=JmhBenchmarkRunner \
               -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
               -Djavacpp.platform=${{ matrix.platform }} \
+              -Dorg.bytedeco.javacpp.platform=${{ matrix.platform }} \
+              -Dpanama.native.classifier=${{ matrix.panamaClassifier }} \
+              -Dcom.xenoamess.hyperscan_panama.platform=${{ matrix.platform }} \
               -Dhyperscan.benchmarks.enabled=true \
               -Dhyperscan.benchmark.implementation=JAVACPP \
-              -Dhyperscan.benchmarks.large.enabled=true \
+              -Dhyperscan.benchmarks.large.enabled=$LARGE_BENCHMARKS \
               -Dbenchmark.platform=${{ matrix.platform }}; then
               exit 0
             fi
@@ -358,9 +334,12 @@ jobs:
               -Dtest=JmhBenchmarkRunner \
               -Dnative.version=${{ steps.version.outputs.nativeVersion }} \
               -Djavacpp.platform=${{ matrix.platform }} \
+              -Dorg.bytedeco.javacpp.platform=${{ matrix.platform }} \
+              -Dpanama.native.classifier=${{ matrix.panamaClassifier }} \
+              -Dcom.xenoamess.hyperscan_panama.platform=${{ matrix.platform }} \
               -Dhyperscan.benchmarks.enabled=true \
               -Dhyperscan.benchmark.implementation=PANAMA \
-              -Dhyperscan.benchmarks.large.enabled=true \
+              -Dhyperscan.benchmarks.large.enabled=$LARGE_BENCHMARKS \
               -Dbenchmark.platform=${{ matrix.platform }}; then
               exit 0
             fi
@@ -370,12 +349,10 @@ jobs:
           echo "::error::PANAMA benchmark failed after 3 attempts"
           exit 1
 
-      # Upstream (com.gliwka.hyperscan:native) has no tier variants and no
-      # windows-x86_64 classifier. On Linux it runs on every tier's runner with
-      # the base platform classifier; results are still attributed to the
-      # current matrix tier via -Dbenchmark.platform.
-      - name: Run JMH benchmarks for UPSTREAM on ${{ matrix.platform }}
-        if: steps.cpu-check.outputs.SKIPPED != 'true' && matrix.os == 'linux'
+      # Upstream has one auto-dispatched classifier per architecture, not an
+      # artifact matching each fork tier. Run it once and report it separately.
+      - name: Run JMH benchmarks for UPSTREAM auto-dispatch
+        if: steps.cpu-check.outputs.SKIPPED != 'true' && (matrix.platform == 'linux-x86_64-baseline' || matrix.platform == 'linux-arm64-baseline')
         run: |
           BASE_PLATFORM="${{ matrix.platform }}"
           BASE_PLATFORM="${BASE_PLATFORM%-avx2}"
@@ -385,10 +362,13 @@ jobs:
               -Dtest=JmhBenchmarkRunner \
               -Dnative.flavor=gliwka \
               -Djavacpp.platform=$BASE_PLATFORM \
+              -Dorg.bytedeco.javacpp.platform=$BASE_PLATFORM \
+              -Dpanama.native.classifier=${{ matrix.panamaClassifier }} \
+              -Dcom.xenoamess.hyperscan_panama.platform=${{ matrix.platform }} \
               -Dhyperscan.benchmarks.enabled=true \
               -Dhyperscan.benchmark.implementation=UPSTREAM \
-              -Dhyperscan.benchmarks.large.enabled=true \
-              -Dbenchmark.platform=${{ matrix.platform }}; then
+              -Dhyperscan.benchmarks.large.enabled=$LARGE_BENCHMARKS \
+              -Dbenchmark.platform="${BASE_PLATFORM}-upstream-auto"; then
               exit 0
             fi
             echo "::warning::UPSTREAM benchmark attempt $attempt failed; retrying in 30s"
@@ -397,14 +377,14 @@ jobs:
           echo "::error::UPSTREAM benchmark failed after 3 attempts"
           exit 1
 
-      - name: Mark UPSTREAM unsupported on ${{ matrix.platform }}
-        if: steps.cpu-check.outputs.SKIPPED != 'true' && matrix.os == 'windows'
+      - name: Mark UPSTREAM unsupported on Windows
+        if: steps.cpu-check.outputs.SKIPPED != 'true' && matrix.platform == 'windows-x86_64-baseline'
         shell: bash
         run: |
           mkdir -p target/benchmark-results
           cat > target/benchmark-results/benchmark-result-upstream.json <<EOF
           {
-            "platform": "${{ matrix.platform }}",
+            "platform": "windows-x86_64-upstream-auto",
             "implementation": "upstream",
             "unsupported": true,
             "reason": "com.gliwka.hyperscan:native publishes no windows-x86_64 classifier",
@@ -425,15 +405,20 @@ jobs:
           path: target/benchmark-results/
           if-no-files-found: warn
 
-      - name: Upload crash logs on failure
-        if: failure()
+      - name: Upload crash logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: crash-logs-${{ matrix.platform }}
           path: |
             hs_err_pid*.log
+            target/surefire-reports/*.dump
             target/surefire-reports/*.dumpstream
           if-no-files-found: ignore
+
+      - name: Fail on native or JVM crash diagnostics
+        if: always()
+        run: bash .github/scripts/check-crash-logs.sh
 
   report:
     name: Aggregate performance report
@@ -441,6 +426,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       fresh: ${{ steps.merge.outputs.count }}
+      complete: ${{ steps.merge.outputs.complete }}
     # smoke gates functional correctness; benchmark cells may flake or skip on
     # missing CPU features, in which case the merge below backfills them with
     # the previous successful run's data (marked stale).
@@ -461,6 +447,9 @@ jobs:
             VERSION=$(sed -n 's:.*<native\.version>\(.*\)</native\.version>.*:\1:p' pom.xml | head -n1)
           fi
           echo "NATIVE_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Test benchmark report scripts
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
       - name: Download all benchmark raw results
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -495,22 +484,12 @@ jobs:
             benchmark-raw \
             benchmark-raw-merged \
             $PREV_DIRS
-          # A run that produced zero fresh benchmark results (e.g. a subset
-          # re-dispatch whose cells cpu-missed again) must not publish: it would
-          # replace a healthy report with an all-stale one. The previous report
-          # stays live instead.
-          if [ -d benchmark-raw ]; then
-            COUNT=$(find benchmark-raw -name '*.json' | wc -l)
-          else
-            COUNT=0
-          fi
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::warning::No fresh benchmark results in this run; keeping the previous report."
-          fi
+          # merge-benchmark-results.py exports the number of validated, complete,
+          # non-unsupported current results. Invalid or all-stale input must not
+          # replace a healthy published report.
 
       - name: Generate performance report
-        if: steps.merge.outputs.count != '0'
+        if: steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         run: |
           python3 .github/scripts/generate-performance-report.py \
             benchmark-raw-merged \
@@ -519,7 +498,7 @@ jobs:
             "${GITHUB_SHA}"
 
       - name: Generate performance summary SVG
-        if: steps.merge.outputs.count != '0'
+        if: steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         run: |
           python3 .github/scripts/generate-performance-svg.py \
             benchmark-raw-merged \
@@ -528,7 +507,7 @@ jobs:
             "${GITHUB_SHA}"
 
       - name: Generate per-scenario SVGs
-        if: steps.merge.outputs.count != '0'
+        if: steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         run: |
           python3 .github/scripts/generate-performance-svg.py \
             benchmark-raw-merged \
@@ -537,7 +516,7 @@ jobs:
             "${GITHUB_SHA}"
 
       - name: Delete previous performance-report artifacts
-        if: steps.merge.outputs.count != '0'
+        if: steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -551,7 +530,7 @@ jobs:
             done
 
       - name: Upload performance report
-        if: steps.merge.outputs.count != '0'
+        if: steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: performance-report
@@ -559,11 +538,11 @@ jobs:
           if-no-files-found: error
 
       - name: Configure GitHub Pages
-        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0'
+        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         uses: actions/configure-pages@v6
 
       - name: Delete previous github-pages artifacts
-        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0'
+        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -583,7 +562,7 @@ jobs:
             done
 
       - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0'
+        if: github.ref == 'refs/heads/master' && steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
         uses: actions/upload-pages-artifact@v5
         with:
           path: target/performance-report/
@@ -659,7 +638,7 @@ jobs:
     concurrency:
       group: github-pages-deploy
       cancel-in-progress: false
-    if: always() && !cancelled() && needs.report.result == 'success' && github.ref == 'refs/heads/master' && needs.report.outputs.fresh != '0'
+    if: always() && !cancelled() && needs.report.result == 'success' && github.ref == 'refs/heads/master' && needs.report.outputs.fresh != '0' && needs.report.outputs.complete == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

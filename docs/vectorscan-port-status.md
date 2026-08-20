@@ -21,7 +21,7 @@
 
 | 源文件 | 状态 | 说明 |
 |--------|------|------|
-| `allocators.cpp` | 已完成 | 已移植为 `AllocatorsTest`，18 个用例双跑通过；原自定义分配器测试已启用，使用 `sun.misc.Unsafe` 进行原生内存分配/释放 |
+| `allocators.cpp` | 已完成 | 已移植为 `AllocatorsTest`，24 个用例双跑通过；原自定义分配器测试已启用，使用 `sun.misc.Unsafe` 进行原生内存分配/释放 |
 | `arg_checks.cpp` | 已完成 | 已移植为 `ArgChecksTest`，240 个用例双跑通过，42 个 `@Disabled(CPP_INTERNAL)` |
 | `bad_patterns.cpp` | 已完成 | 已移植为 `BadPatternsTest`，1639 个用例双跑通过；非法 UTF-8 与嵌套/交集字符类用例因 `INVALID_UTF8` / `NATIVE_VERSION` 在读取阶段过滤 |
 | `behaviour.cpp` | 已完成 | 已移植为 `BehaviourTest`；多 GB 大数据用例已启用：`scanSeveralGigabytesNoMatch` 扫描 5GB、`scanGigabytesStreamingMatch` 只跑 1GB/2GB、`scanGigabytesBlockMatch` 最大 1MB；均保留 `@Tag("large-data")` 并加入常规测试套件 |
@@ -48,6 +48,7 @@
 - **JavaCPP 多表达式编译 GC 安全**：`compileNative`、`compileRaw(String[]...)` 等多表达式路径把 `BytePointer` / `hs_expr_ext_t` 等临时对象存入本地列表，保证在 native 调用返回前不被 GC 回收。
 - **表达式元数据回退**：当 database 未携带表达式列表（如反序列化后的数据库）时，JavaCpp/Panama 适配器会根据回调中的 id 构造一个仅含 id 的 `DualExpression`，避免 raw 扫描回调 NPE。
 - **新增 `DualApi` 能力**：`offsetPastHorizon()`、`scratchInUse()`、`allocScratchRaw(db, existingScratch)` 支持 SOM 与 scratch-in-use 测试；`badAlign()`、`allocateRawDatabase()`、`offsetRawDatabase()`、`getStreamScratch()` 支持 behaviour 序列化对齐与原始流测试。
+- **自定义分配器配置**：Hyperscan allocator setter 修改进程级全局状态，只能在没有 native 调用进行、且旧配置分配的对象均已释放时切换；adapter 不为上游 API 额外提供并发热切换语义。
 - **数据文件**：`bad_patterns.txt`、`bad_patterns_fast.txt` 已复制到 `src/test/resources/vectorscan/datafiles`；大文件通过 Git LFS 跟踪。
 
 ## 待办
@@ -83,14 +84,14 @@
 
 ### 实施结果
 
-1. 已新增开关 `hyperscan.benchmarks.large.enabled`，默认值 `true`。
+1. 已新增开关 `hyperscan.benchmarks.large.enabled`，默认值 `false`；CI 仅在手动运行并选择 `largeBenchmarks` 时启用。
 2. 已新增三个 benchmark（现为 JMH 基准类，位于 `com.xenoamess.hyperscan.smoke.benchmarks.jmh.large`）：
-   - `ScanSeveralGigabytesNoMatchBenchmark`：5GB，1MB 分块，STREAM，单次测量，记录吞吐。
-   - `ScanGigabytesStreamingMatchBenchmark`：13 个 case 全部，1GB 和 2GB 各跑，STREAM，单次测量，记录吞吐/匹配数。
-   - `ScanGigabytesBlockMatchBenchmark`：13 个 case 全部，1MB 块，BLOCK，多次测量，记录吞吐/匹配数。
+   - `ScanSeveralGigabytesNoMatchBenchmark`：5 GiB，1 MiB 分块，STREAM，单次测量，记录吞吐。
+   - `ScanGigabytesStreamingMatchBenchmark`：8 个代表 case 各跑 1 GiB，并用第一个 case 增加 2 GiB 缩放点，STREAM，单次测量。
+   - `ScanGigabytesBlockMatchBenchmark`：8 个代表 case，1 MiB 块，每次 invocation 扫描 1000 次并通过 `@OperationsPerInvocation` 归一化。
 3. 每个 benchmark 都按 `DualImplementation` 同时跑 JavaCpp 和 Panama（CI 中由 `JmhBenchmarkRunner` 分别以 `-Dhyperscan.benchmark.implementation=JAVACPP/PANAMA` 运行）。
-4. `BenchmarkResult` 记录：`inputBytes`、`matches`、`elapsedMs`、`throughputMBps`。
+4. `BenchmarkResult` 记录：`inputBytes`、`measurementSamples`、`matchesPerOperation`、`elapsedMsPerOperation`、`throughputMiBps`。
 5. 全部基准场景已统一迁移到 JMH（`com.xenoamess.hyperscan.smoke.benchmarks.jmh`，由 `JmhBenchmarkRunner` 执行），原 `BenchmarkSuiteTest` 已移除。
-6. `.github/workflows/smoke-test.yml` 的 `mvn -B test` 已显式加上 `-Dhyperscan.benchmarks.large.enabled=true`。
-7. 报告脚本 `generate-performance-report.py` / `generate-performance-svg.py` 已支持 `throughputMBps` 指标（原有指标为 `throughputMBpsAvg`）。
+6. `.github/workflows/smoke-test.yml` 的常规 benchmark 显式传递手动输入 `largeBenchmarks`，默认不运行大流量场景。
+7. 报告脚本 `generate-performance-report.py` / `generate-performance-svg.py` 使用准确的 `throughputMiBps` / `throughputMiBpsAvg` 指标名。
 8. 实施时全量测试：4119 个测试，0 失败，0 错误，46 跳过。

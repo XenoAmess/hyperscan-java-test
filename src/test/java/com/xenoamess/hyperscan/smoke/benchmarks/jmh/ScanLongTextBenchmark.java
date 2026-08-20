@@ -41,7 +41,6 @@ public class ScanLongTextBenchmark {
         public DualScanner scanner;
         public String input;
         public List<DualExpression> expressions;
-        public int matches;
 
         @Setup(Level.Trial)
         public void setUp() {
@@ -57,7 +56,6 @@ public class ScanLongTextBenchmark {
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
             input = BenchmarkData.generateLongText(1_000_000);
-            matches = api.scan(scanner, database, input).size();
         }
 
         @TearDown(Level.Trial)
@@ -78,11 +76,9 @@ public class ScanLongTextBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.setUp();
-        BenchmarkResult result = BenchmarkResultConverter.averageTimeThroughput(
-                "scanLongText", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
-        state.tearDown();
-        return result;
+        String input = BenchmarkData.generateLongText(1_000_000);
+        return BenchmarkResultConverter.averageTimeThroughput(
+                "wrapperScanLongText", runResult.getPrimaryResult(),
+                BenchmarkData.utf8Length(input), 4, null);
     }
 }

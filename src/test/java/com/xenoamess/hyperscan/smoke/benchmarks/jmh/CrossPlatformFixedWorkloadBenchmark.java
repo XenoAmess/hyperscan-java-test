@@ -40,7 +40,6 @@ public class CrossPlatformFixedWorkloadBenchmark {
         public DualScanner scanner;
         public String input;
         public List<DualExpression> expressions;
-        public int matches;
 
         @Setup(Level.Trial)
         public void setUp() {
@@ -51,7 +50,6 @@ public class CrossPlatformFixedWorkloadBenchmark {
             database = api.compileDatabase(expressions);
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
-            matches = api.scan(scanner, database, input).size();
         }
 
         @TearDown(Level.Trial)
@@ -72,11 +70,9 @@ public class CrossPlatformFixedWorkloadBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.setUp();
-        BenchmarkResult result = BenchmarkResultConverter.averageTimeThroughput(
-                "ISA granularity benchmark", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
-        state.tearDown();
-        return result;
+        String input = BenchmarkData.buildCrossPlatformInput(20_000, 50);
+        return BenchmarkResultConverter.averageTimeThroughput(
+                "wrapper fixed workload (materialized matches)", runResult.getPrimaryResult(),
+                BenchmarkData.utf8Length(input), 500, null);
     }
 }

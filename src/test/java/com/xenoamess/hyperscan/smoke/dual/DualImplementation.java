@@ -28,6 +28,10 @@ public enum DualImplementation {
 
     public abstract DualApi createAdapter();
 
+    public static DualImplementation[] functionalValues() {
+        return new DualImplementation[]{JAVACPP, PANAMA};
+    }
+
     @Override
     public String toString() {
         return name().toLowerCase();

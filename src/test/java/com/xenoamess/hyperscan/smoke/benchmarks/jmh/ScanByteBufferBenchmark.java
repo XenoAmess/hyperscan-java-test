@@ -22,6 +22,7 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.results.RunResult;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -38,11 +39,10 @@ public class ScanByteBufferBenchmark {
         public DualApi api;
         public DualDatabase database;
         public DualScanner scanner;
-        public byte[] input;
+        public ByteBuffer input;
         public List<DualExpression> expressions;
         public long[] matchCounter;
         public DualByteMatchHandler handler;
-        public long matches;
 
         @Setup(Level.Trial)
         public void setUp() {
@@ -55,15 +55,14 @@ public class ScanByteBufferBenchmark {
             database = api.compileDatabase(expressions);
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
-            input = BenchmarkData.generateLongText(100_000).getBytes(StandardCharsets.UTF_8);
+            byte[] inputBytes = BenchmarkData.generateLongText(100_000).getBytes(StandardCharsets.UTF_8);
+            input = ByteBuffer.allocateDirect(inputBytes.length);
+            input.put(inputBytes).flip();
             matchCounter = new long[1];
             handler = (expression, fromByteIdx, toByteIdx) -> {
                 matchCounter[0]++;
                 return true;
             };
-            api.scan(scanner, database, input, handler);
-            matches = matchCounter[0];
-            matchCounter[0] = 0;
         }
 
         @TearDown(Level.Trial)
@@ -84,11 +83,9 @@ public class ScanByteBufferBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.setUp();
         BenchmarkResult result = BenchmarkResultConverter.singleShotOps(
-                "scanByteBuffer", runResult.getPrimaryResult(), state.matches * 10000);
-        state.tearDown();
-        return result;
+                "scanDirectByteBufferCounting", runResult.getPrimaryResult(), null);
+        return result.metric("patterns", 2)
+                .metric("inputBytes", BenchmarkData.utf8Length(BenchmarkData.generateLongText(100_000)));
     }
 }

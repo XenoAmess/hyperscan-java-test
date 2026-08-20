@@ -40,7 +40,6 @@ public class ScanManyLiteralPatternsBenchmark {
         public DualScanner scanner;
         public String input;
         public List<DualExpression> expressions;
-        public int matches;
 
         @Setup(Level.Trial)
         public void setUp() {
@@ -51,7 +50,6 @@ public class ScanManyLiteralPatternsBenchmark {
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
             input = BenchmarkData.buildHaystackWithMatches(expressions);
-            matches = api.scan(scanner, database, input).size();
         }
 
         @TearDown(Level.Trial)
@@ -72,11 +70,9 @@ public class ScanManyLiteralPatternsBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.setUp();
-        BenchmarkResult result = BenchmarkResultConverter.averageTimeThroughput(
-                "scanManyLiteralPatterns", runResult.getPrimaryResult(), state.input, state.expressions, state.matches);
-        state.tearDown();
-        return result;
+        String input = BenchmarkData.buildLiteralHaystack(500);
+        return BenchmarkResultConverter.averageTimeThroughput(
+                "wrapperScanManyLiteralPatterns", runResult.getPrimaryResult(),
+                BenchmarkData.utf8Length(input), 500, 100L);
     }
 }

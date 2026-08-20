@@ -207,7 +207,7 @@ class SerializeTest {
     public static class SerializeArgumentsSource implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            return Stream.of(DualImplementation.values())
+            return Stream.of(DualImplementation.functionalValues())
                     .flatMap(impl -> {
                         DualApi api = impl.createAdapter();
                         return Arrays.stream(validModes(api))

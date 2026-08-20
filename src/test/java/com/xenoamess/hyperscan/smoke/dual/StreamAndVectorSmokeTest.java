@@ -7,9 +7,12 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class StreamAndVectorSmokeTest {
 
@@ -231,5 +234,126 @@ class StreamAndVectorSmokeTest {
         } finally {
             api.closeDatabase(database);
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource("adapters")
+    void blockCallbackExceptionIsRethrown(DualApi api) {
+        RuntimeException failure = new RuntimeException("block callback failed");
+        try (DualDatabase database = api.compileDatabase(api.createExpression("test", 1));
+             DualScanner scanner = api.createScanner()) {
+            api.allocScratch(scanner, database);
+
+            assertThatThrownBy(() -> api.scan(
+                    scanner, database, "test".getBytes(), (expression, from, to) -> {
+                        throw failure;
+                    })).isSameAs(failure);
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("adapters")
+    void stringCallbackExceptionIsRethrown(DualApi api) {
+        RuntimeException failure = new RuntimeException("string callback failed");
+        try (DualDatabase database = api.compileDatabase(api.createExpression("test", 1));
+             DualScanner scanner = api.createScanner()) {
+            api.allocScratch(scanner, database);
+
+            assertThatThrownBy(() -> api.scan(
+                    scanner, database, "test", (expression, from, to) -> {
+                        throw failure;
+                    })).isSameAs(failure);
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("adapters")
+    void vectoredCallbackExceptionIsRethrown(DualApi api) {
+        RuntimeException failure = new RuntimeException("vectored callback failed");
+        try (DualDatabase database = api.compileDatabase(
+                api.createExpression("test", 1), DualMode.VECTORED);
+             DualScanner scanner = api.createScanner()) {
+            api.allocScratch(scanner, database);
+
+            assertThatThrownBy(() -> api.scanVector(
+                    scanner, database, new byte[][] {"test".getBytes()}, (expression, from, to) -> {
+                        throw failure;
+                    })).isSameAs(failure);
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("adapters")
+    void streamCloseCallbackExceptionIsRethrownAfterClosing(DualApi api) {
+        RuntimeException failure = new RuntimeException("stream close callback failed");
+        try (DualDatabase database = api.compileDatabase(
+                api.createExpression("test$", 1), DualMode.STREAM);
+             DualScanner scanner = api.createScanner();
+             DualStream stream = api.openStream(database)) {
+            api.scanStream(scanner, stream, "test".getBytes(), (expression, from, to) -> true);
+
+            assertThatThrownBy(() -> api.closeStream(scanner, stream, (expression, from, to) -> {
+                throw failure;
+            })).isSameAs(failure);
+            stream.close();
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("adapters")
+    void nestedRawScanRestoresOuterCallbackContext(DualApi api) {
+        AtomicBoolean nested = new AtomicBoolean();
+        AtomicInteger outerMatches = new AtomicInteger();
+        AtomicInteger innerMatches = new AtomicInteger();
+        DualCompileResult outerResult = api.compileRaw(api.createExpression(".", 1), api.modeBlock());
+        DualCompileResult innerResult = api.compileRaw(api.createExpression("x", 2), api.modeBlock());
+        try (DualDatabase outerDatabase = outerResult.database();
+             DualDatabase innerDatabase = innerResult.database();
+             DualScanner outerScanner = api.allocScratchRaw(outerDatabase).scratch();
+             DualScanner innerScanner = api.allocScratchRaw(innerDatabase).scratch()) {
+            assertThat(outerResult.code()).isEqualTo(api.success());
+            assertThat(innerResult.code()).isEqualTo(api.success());
+            assertThat(api.scanRaw(outerScanner, outerDatabase, "ab".getBytes(), (expression, from, to) -> {
+                outerMatches.incrementAndGet();
+                if (nested.compareAndSet(false, true)) {
+                    assertThat(api.scanRaw(innerScanner, innerDatabase, "x".getBytes(), (inner, innerFrom, innerTo) -> {
+                        innerMatches.incrementAndGet();
+                        return true;
+                    })).isEqualTo(api.success());
+                }
+                return true;
+            })).isEqualTo(api.success());
+        }
+
+        assertThat(outerMatches).hasValue(2);
+        assertThat(innerMatches).hasValue(1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("adapters")
+    void nestedPublicStreamScanPreservesOuterInput(DualApi api) {
+        AtomicBoolean nested = new AtomicBoolean();
+        AtomicInteger outerMatches = new AtomicInteger();
+        AtomicInteger innerMatches = new AtomicInteger();
+        try (DualDatabase outerDatabase = api.compileDatabase(
+                     api.createExpression("[ab]", 1), DualMode.STREAM);
+             DualDatabase innerDatabase = api.compileDatabase(
+                     api.createExpression("z", 2), DualMode.STREAM);
+             DualStream outerStream = api.openStream(outerDatabase);
+             DualStream innerStream = api.openStream(innerDatabase)) {
+            api.scanStream(null, outerStream, "ab".getBytes(), (expression, from, to) -> {
+                outerMatches.incrementAndGet();
+                if (nested.compareAndSet(false, true)) {
+                    api.scanStream(null, innerStream, "zz".getBytes(), (inner, innerFrom, innerTo) -> {
+                        innerMatches.incrementAndGet();
+                        return true;
+                    });
+                }
+                return true;
+            });
+        }
+
+        assertThat(outerMatches).hasValue(2);
+        assertThat(innerMatches).hasValue(2);
     }
 }

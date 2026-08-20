@@ -41,11 +41,14 @@ import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 
 import java.util.EnumSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import sun.misc.Unsafe;
@@ -70,27 +73,35 @@ public class JavaCppAdapter implements DualApi {
 
     private static final ThreadLocal<ByteBuffer> SCAN_BUFFER = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(0));
     private static final ThreadLocal<HandlerContext> STREAM_CALLBACK = new ThreadLocal<>();
+    private static final IdentityHashMap<Object, Integer> DATABASE_STREAM_LEASES = new IdentityHashMap<>();
+    private static final IdentityHashMap<Object, Integer> DATABASE_OPERATION_LEASES = new IdentityHashMap<>();
+    private static final Object ALLOCATOR_LOCK = new Object();
 
     private static final match_event_handler MATCH_HANDLER = new match_event_handler() {
         @Override
         public int call(int id, long from, long to, int flags, Pointer context) {
             HandlerContext ctx = STREAM_CALLBACK.get();
-            if (ctx == null) {
-                return 0;
+            try {
+                if (ctx == null) {
+                    return 0;
+                }
+                DualExpression expression = null;
+                DualExpression[] byId = ctx.expressionsById();
+                if (id >= 0 && id < byId.length) {
+                    expression = byId[id];
+                }
+                if (expression == null) {
+                    expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
+                }
+                return ctx.handler().onMatch(expression, from, to) ? 0 : -1;
+            } catch (Throwable failure) {
+                if (ctx != null && ctx.failure == null) {
+                    ctx.failure = failure;
+                }
+                return -1;
             }
-            DualExpression expression = null;
-            DualExpression[] byId = ctx.expressionsById();
-            if (id >= 0 && id < byId.length) {
-                expression = byId[id];
-            }
-            if (expression == null) {
-                expression = new DualExpression("", EnumSet.noneOf(DualExpressionFlag.class), id);
-            }
-            return ctx.handler().onMatch(expression, from, to) ? 0 : -1;
         }
     };
-
-    private static final hs_expr_ext_t DEFAULT_EXPR_EXT = newDefaultExprExt();
 
     private static hs_alloc_t currentAllocator;
     private static hs_free_t currentFree;
@@ -112,6 +123,7 @@ public class JavaCppAdapter implements DualApi {
     private static hs_free_t currentStreamFree;
     private static DualAllocator currentDualStreamAllocator;
     private static DualFree currentDualStreamFree;
+    private static DualFree effectiveMiscFree;
 
     private static final Arena HS_LIBRARY_ARENA = Arena.global();
     private static final SymbolLookup HS_LIBRARY_LOOKUP;
@@ -200,11 +212,15 @@ public class JavaCppAdapter implements DualApi {
                 allocSeg = MemorySegment.NULL;
             } else {
                 allocSeg = com.xenoamess.hyperscan_panama.jni.generated.hs_alloc_t.allocate(size -> {
-                    long address = alloc.allocate(size);
-                    if (address == 0) {
+                    try {
+                        long address = alloc.allocate(size);
+                        if (address == 0) {
+                            return MemorySegment.NULL;
+                        }
+                        return MemorySegment.ofAddress(address).reinterpret(size);
+                    } catch (Throwable ignored) {
                         return MemorySegment.NULL;
                     }
-                    return MemorySegment.ofAddress(address).reinterpret(size);
                 }, HS_LIBRARY_ARENA);
             }
             MemorySegment freeSeg;
@@ -212,10 +228,13 @@ public class JavaCppAdapter implements DualApi {
                 freeSeg = MemorySegment.NULL;
             } else {
                 freeSeg = com.xenoamess.hyperscan_panama.jni.generated.hs_free_t.allocate(ptr -> {
-                    if (ptr == null || ptr.address() == 0) {
-                        return;
+                    try {
+                        if (ptr != null && ptr.address() != 0) {
+                            free.free(ptr.address());
+                        }
+                    } catch (Throwable ignored) {
+                        // Native free callbacks must not throw across the upcall boundary.
                     }
-                    free.free(ptr.address());
                 }, HS_LIBRARY_ARENA);
             }
             int result = (int) handle.invokeExact(allocSeg, freeSeg);
@@ -234,11 +253,15 @@ public class JavaCppAdapter implements DualApi {
         return new hs_alloc_t() {
             @Override
             public Pointer call(long size) {
-                long address = alloc.allocate(size);
-                if (address == 0) {
+                try {
+                    long address = alloc.allocate(size);
+                    if (address == 0) {
+                        return null;
+                    }
+                    return new OffsetPointer(address);
+                } catch (Throwable ignored) {
                     return null;
                 }
-                return new OffsetPointer(address);
             }
         };
     }
@@ -250,66 +273,216 @@ public class JavaCppAdapter implements DualApi {
         return new hs_free_t() {
             @Override
             public void call(Pointer ptr) {
-                if (ptr == null) {
-                    return;
+                try {
+                    if (ptr != null) {
+                        free.free(ptr.address());
+                    }
+                } catch (Throwable ignored) {
+                    // Native free callbacks must not throw across the upcall boundary.
                 }
-                free.free(ptr.address());
             }
         };
     }
 
     @Override
     public void setAllocator(DualAllocator alloc, DualFree free) {
-        currentAllocator = wrapAllocator(alloc);
-        currentFree = wrapFree(free);
-        currentDualAllocator = alloc;
-        currentDualFree = free;
-        checkResult(hyperscan.hs_set_allocator(currentAllocator, currentFree));
-        setHsLibraryAllocator("hs_set_allocator", alloc, free);
+        synchronized (ALLOCATOR_LOCK) {
+            currentAllocator = wrapAllocator(alloc);
+            currentFree = wrapFree(free);
+            currentDualAllocator = alloc;
+            currentDualFree = free;
+            checkResult(hyperscan.hs_set_allocator(currentAllocator, currentFree));
+            setHsLibraryAllocator("hs_set_allocator", alloc, free);
+            effectiveMiscFree = free;
+        }
     }
 
     @Override
     public void setDatabaseAllocator(DualAllocator alloc, DualFree free) {
-        currentDatabaseAllocator = wrapAllocator(alloc);
-        currentDatabaseFree = wrapFree(free);
-        currentDualDatabaseAllocator = alloc;
-        currentDualDatabaseFree = free;
-        checkResult(hyperscan.hs_set_database_allocator(currentDatabaseAllocator, currentDatabaseFree));
-        setHsLibraryAllocator("hs_set_database_allocator", alloc, free);
+        synchronized (ALLOCATOR_LOCK) {
+            currentDatabaseAllocator = wrapAllocator(alloc);
+            currentDatabaseFree = wrapFree(free);
+            currentDualDatabaseAllocator = alloc;
+            currentDualDatabaseFree = free;
+            checkResult(hyperscan.hs_set_database_allocator(currentDatabaseAllocator, currentDatabaseFree));
+            setHsLibraryAllocator("hs_set_database_allocator", alloc, free);
+        }
     }
 
     @Override
     public void setMiscAllocator(DualAllocator alloc, DualFree free) {
-        currentMiscAllocator = wrapAllocator(alloc);
-        currentMiscFree = wrapFree(free);
-        currentDualMiscAllocator = alloc;
-        currentDualMiscFree = free;
-        checkResult(hyperscan.hs_set_misc_allocator(currentMiscAllocator, currentMiscFree));
-        setHsLibraryAllocator("hs_set_misc_allocator", alloc, free);
+        synchronized (ALLOCATOR_LOCK) {
+            currentMiscAllocator = wrapAllocator(alloc);
+            currentMiscFree = wrapFree(free);
+            currentDualMiscAllocator = alloc;
+            currentDualMiscFree = free;
+            checkResult(hyperscan.hs_set_misc_allocator(currentMiscAllocator, currentMiscFree));
+            setHsLibraryAllocator("hs_set_misc_allocator", alloc, free);
+            effectiveMiscFree = free;
+        }
     }
 
     @Override
     public void setScratchAllocator(DualAllocator alloc, DualFree free) {
-        currentScratchAllocator = wrapAllocator(alloc);
-        currentScratchFree = wrapFree(free);
-        currentDualScratchAllocator = alloc;
-        currentDualScratchFree = free;
-        checkResult(hyperscan.hs_set_scratch_allocator(currentScratchAllocator, currentScratchFree));
-        setHsLibraryAllocator("hs_set_scratch_allocator", alloc, free);
+        synchronized (ALLOCATOR_LOCK) {
+            currentScratchAllocator = wrapAllocator(alloc);
+            currentScratchFree = wrapFree(free);
+            currentDualScratchAllocator = alloc;
+            currentDualScratchFree = free;
+            checkResult(hyperscan.hs_set_scratch_allocator(currentScratchAllocator, currentScratchFree));
+            setHsLibraryAllocator("hs_set_scratch_allocator", alloc, free);
+        }
     }
 
     @Override
     public void setStreamAllocator(DualAllocator alloc, DualFree free) {
-        currentStreamAllocator = wrapAllocator(alloc);
-        currentStreamFree = wrapFree(free);
-        currentDualStreamAllocator = alloc;
-        currentDualStreamFree = free;
-        checkResult(hyperscan.hs_set_stream_allocator(currentStreamAllocator, currentStreamFree));
-        setHsLibraryAllocator("hs_set_stream_allocator", alloc, free);
+        synchronized (ALLOCATOR_LOCK) {
+            currentStreamAllocator = wrapAllocator(alloc);
+            currentStreamFree = wrapFree(free);
+            currentDualStreamAllocator = alloc;
+            currentDualStreamFree = free;
+            checkResult(hyperscan.hs_set_stream_allocator(currentStreamAllocator, currentStreamFree));
+            setHsLibraryAllocator("hs_set_stream_allocator", alloc, free);
+        }
     }
 
     private static MemorySegment toSegment(Pointer p) {
         return p == null ? MemorySegment.NULL : MemorySegment.ofAddress(p.address());
+    }
+
+    private static void freeMiscPointer(Pointer pointer) {
+        if (pointer == null || pointer.address() == 0) {
+            return;
+        }
+        DualFree free = effectiveMiscFree;
+        if (free != null) {
+            free.free(pointer.address());
+        } else {
+            Pointer.free(pointer);
+        }
+    }
+
+    private static BytePointer utf8CString(String value) {
+        return value == null ? new BytePointer() : new BytePointer(value, StandardCharsets.UTF_8);
+    }
+
+    private static void closePointers(List<? extends Pointer> pointers) {
+        for (int i = pointers.size() - 1; i >= 0; i--) {
+            Pointer pointer = pointers.get(i);
+            if (pointer != null) {
+                pointer.close();
+            }
+        }
+    }
+
+    private static Object databaseLeaseKey(DualDatabase database) {
+        return database instanceof JavaCppRawDatabase raw ? raw.state : database;
+    }
+
+    private static void acquireDatabaseStreamLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            DATABASE_STREAM_LEASES.put(key, DATABASE_STREAM_LEASES.getOrDefault(key, 0) + 1);
+        }
+    }
+
+    private static void releaseDatabaseStreamLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            Integer count = DATABASE_STREAM_LEASES.get(key);
+            if (count == null || count == 0) {
+                throw new IllegalStateException("Database stream lease is not held");
+            }
+            if (count == 1) {
+                DATABASE_STREAM_LEASES.remove(key);
+            } else {
+                DATABASE_STREAM_LEASES.put(key, count - 1);
+            }
+        }
+    }
+
+    private static void acquireDatabaseOperationLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            DATABASE_OPERATION_LEASES.put(
+                    key, DATABASE_OPERATION_LEASES.getOrDefault(key, 0) + 1);
+        }
+    }
+
+    private static void releaseDatabaseOperationLease(DualDatabase database) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            Object key = databaseLeaseKey(database);
+            Integer count = DATABASE_OPERATION_LEASES.get(key);
+            if (count == null || count == 0) {
+                throw new IllegalStateException("Database operation lease is not held");
+            }
+            if (count == 1) {
+                DATABASE_OPERATION_LEASES.remove(key);
+            } else {
+                DATABASE_OPERATION_LEASES.put(key, count - 1);
+            }
+        }
+    }
+
+    private static JavaCppDatabaseOperation acquireDatabaseOperation(DualDatabase database) {
+        acquireDatabaseOperationLease(database);
+        try {
+            return new JavaCppDatabaseOperation(database, nativeDatabase(database));
+        } catch (RuntimeException | Error e) {
+            releaseDatabaseOperationLease(database);
+            throw e;
+        }
+    }
+
+    private static final class JavaCppDatabaseOperation implements AutoCloseable {
+        final DualDatabase owner;
+        final hs_database_t database;
+
+        JavaCppDatabaseOperation(DualDatabase owner, hs_database_t database) {
+            this.owner = owner;
+            this.database = database;
+        }
+
+        @Override
+        public void close() {
+            releaseDatabaseOperationLease(owner);
+        }
+    }
+
+    private static int freeDatabaseWhenUnused(DualDatabase database, IntSupplier free) {
+        synchronized (DATABASE_STREAM_LEASES) {
+            if (DATABASE_STREAM_LEASES.getOrDefault(databaseLeaseKey(database), 0) != 0) {
+                throw new IllegalStateException("Database is in use by an open stream");
+            }
+            if (DATABASE_OPERATION_LEASES.getOrDefault(databaseLeaseKey(database), 0) != 0) {
+                throw new IllegalStateException("Database is in use by an active operation");
+            }
+            return free.getAsInt();
+        }
+    }
+
+    private static void closeDatabaseWhenUnused(DualDatabase database, Runnable close) {
+        freeDatabaseWhenUnused(database, () -> {
+            close.run();
+            return hyperscan.HS_SUCCESS;
+        });
+    }
+
+    private static String compileErrorMessage(hs_compile_error_t error) {
+        return error != null && !error.isNull() && error.message() != null
+                ? error.message().getString(StandardCharsets.UTF_8)
+                : null;
+    }
+
+    private static void freeCompileErrorDirect(hs_compile_error_t error) {
+        if (error == null || error.isNull()) {
+            return;
+        }
+        try {
+            int ignored = (int) HsLibrary.HS_FREE_COMPILE_ERROR.invokeExact(toSegment(error));
+        } catch (Throwable e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static final class HsLibrary {
@@ -342,13 +515,18 @@ public class JavaCppAdapter implements DualApi {
 
     private static hs_expr_ext_t newDefaultExprExt() {
         hs_expr_ext_t ext = new hs_expr_ext_t();
-        ext.flags(0L);
-        ext.min_offset(0L);
-        ext.max_offset(-1L);
-        ext.min_length(0L);
-        ext.edit_distance(0);
-        ext.hamming_distance(0);
-        return ext;
+        try {
+            ext.flags(0L);
+            ext.min_offset(0L);
+            ext.max_offset(-1L);
+            ext.min_length(0L);
+            ext.edit_distance(0);
+            ext.hamming_distance(0);
+            return ext;
+        } catch (RuntimeException | Error e) {
+            ext.close();
+            throw e;
+        }
     }
 
     private static void applyExprExt(hs_expr_ext_t ext, DualExpressionExt src) {
@@ -360,7 +538,26 @@ public class JavaCppAdapter implements DualApi {
         ext.hamming_distance(src.hammingDistance());
     }
 
-    private record HandlerContext(DualByteMatchHandler handler, DualExpression[] expressionsById) {
+    private static final class HandlerContext {
+        private final DualByteMatchHandler handler;
+        private final DualExpression[] expressionsById;
+        private final HandlerContext previous;
+        private Throwable failure;
+
+        private HandlerContext(DualByteMatchHandler handler, DualExpression[] expressionsById,
+                               HandlerContext previous) {
+            this.handler = handler;
+            this.expressionsById = expressionsById;
+            this.previous = previous;
+        }
+
+        private DualByteMatchHandler handler() {
+            return handler;
+        }
+
+        private DualExpression[] expressionsById() {
+            return expressionsById;
+        }
     }
 
     private static DualExpression[] buildExpressionLookup(List<DualExpression> expressions) {
@@ -382,7 +579,29 @@ public class JavaCppAdapter implements DualApi {
     }
 
     private static HandlerContext newHandlerContext(DualByteMatchHandler handler, List<DualExpression> expressions) {
-        return new HandlerContext(handler, buildExpressionLookup(expressions));
+        return new HandlerContext(handler, buildExpressionLookup(expressions), STREAM_CALLBACK.get());
+    }
+
+    private static void restoreHandlerContext() {
+        HandlerContext current = STREAM_CALLBACK.get();
+        if (current != null && current.previous != null) {
+            STREAM_CALLBACK.set(current.previous);
+        } else {
+            STREAM_CALLBACK.remove();
+        }
+    }
+
+    private static int propagateHandlerFailure(int result) {
+        HandlerContext ctx = STREAM_CALLBACK.get();
+        if (ctx != null && ctx.failure != null) {
+            throwUnchecked(ctx.failure);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <E extends Throwable> void throwUnchecked(Throwable failure) throws E {
+        throw (E) failure;
     }
 
     @Override
@@ -441,15 +660,23 @@ public class JavaCppAdapter implements DualApi {
     @Override
     public void allocScratch(DualScanner scanner, DualDatabase database) {
         JavaCppScanner s = (JavaCppScanner) scanner;
-        JavaCppWrapperDatabase db = (JavaCppWrapperDatabase) database;
-        s.scanner.allocScratch(db.database);
+        s.requireOpen();
+        if (database instanceof JavaCppWrapperDatabase db) {
+            s.scanner.allocScratch(db.database);
+        } else {
+            s.ensureNativeScratch(nativeDatabase(database));
+        }
     }
 
     @Override
     public List<DualMatch> scan(DualScanner scanner, DualDatabase database, String input) {
         JavaCppScanner s = (JavaCppScanner) scanner;
+        s.requireOpen();
         JavaCppWrapperDatabase db = (JavaCppWrapperDatabase) database;
-        List<Match> matches = s.scanner.scan(db.database, input);
+        List<Match> matches;
+        try (JavaCppDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            matches = s.scanner.scan(db.database, input);
+        }
         List<DualMatch> result = new ArrayList<>();
         for (Match m : matches) {
             result.add(new DualMatch(
@@ -466,13 +693,25 @@ public class JavaCppAdapter implements DualApi {
     @Override
     public void scan(DualScanner scanner, DualDatabase database, String input, DualStringMatchHandler handler) {
         JavaCppScanner s = (JavaCppScanner) scanner;
+        s.requireOpen();
         JavaCppWrapperDatabase db = (JavaCppWrapperDatabase) database;
-        s.scanner.scan(db.database, input, new StringMatchEventHandler() {
-            @Override
-            public boolean onMatch(Expression expression, long from, long to) {
-                return handler.onMatch(toDualExpression(expression), from, to);
-            }
-        });
+        Throwable[] callbackFailure = new Throwable[1];
+        try (JavaCppDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            s.scanner.scan(db.database, input, new StringMatchEventHandler() {
+                @Override
+                public boolean onMatch(Expression expression, long from, long to) {
+                    try {
+                        return handler.onMatch(toDualExpression(expression), from, to);
+                    } catch (Throwable failure) {
+                        callbackFailure[0] = failure;
+                        return false;
+                    }
+                }
+            });
+        }
+        if (callbackFailure[0] != null) {
+            throwUnchecked(callbackFailure[0]);
+        }
     }
 
     @Override
@@ -480,24 +719,28 @@ public class JavaCppAdapter implements DualApi {
         if (database == null) {
             throw new IllegalArgumentException("Database is null");
         }
-        hs_database_t db = nativeDatabase(database);
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        if (scratch == null) {
-            throw new IllegalStateException("Scratch space has already been deallocated");
-        }
-        List<DualExpression> expressions = expressionsOf(database);
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
-        }
-        try (BytePointer data = newBytePointer(input)) {
-            int length = input == null ? 4 : input.length;
-            int result = hyperscan.hs_scan(db, data, length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
-                checkResult(result);
+        try (JavaCppDatabaseOperation operation = acquireDatabaseOperation(database);
+             BytePointer data = newBytePointer(input)) {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+            if (scratch == null) {
+                throw new IllegalStateException("Scratch space has already been deallocated");
             }
-        } finally {
+            List<DualExpression> expressions = expressionsOf(database);
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            }
+            try {
+                int length = input == null ? 4 : input.length;
+                int result = propagateHandlerFailure(hyperscan.hs_scan(
+                        operation.database, data, length, 0, scratch,
+                        handler == null ? null : MATCH_HANDLER, null));
+                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                    checkResult(result);
+                }
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
             }
         }
     }
@@ -507,24 +750,28 @@ public class JavaCppAdapter implements DualApi {
         if (database == null) {
             throw new IllegalArgumentException("Database is null");
         }
-        hs_database_t db = nativeDatabase(database);
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        if (scratch == null) {
-            throw new IllegalStateException("Scratch space has already been deallocated");
-        }
-        List<DualExpression> expressions = expressionsOf(database);
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
-        }
-        try (BytePointer data = newBytePointer(input)) {
-            int length = input == null ? 4 : input.remaining();
-            int result = hyperscan.hs_scan(db, data, length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
-                checkResult(result);
+        try (JavaCppDatabaseOperation operation = acquireDatabaseOperation(database);
+             BytePointer data = newBytePointer(input)) {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+            if (scratch == null) {
+                throw new IllegalStateException("Scratch space has already been deallocated");
             }
-        } finally {
+            List<DualExpression> expressions = expressionsOf(database);
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            }
+            try {
+                int length = input == null ? 4 : input.remaining();
+                int result = propagateHandlerFailure(hyperscan.hs_scan(
+                        operation.database, data, length, 0, scratch,
+                        handler == null ? null : MATCH_HANDLER, null));
+                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                    checkResult(result);
+                }
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
             }
         }
     }
@@ -532,31 +779,57 @@ public class JavaCppAdapter implements DualApi {
     @Override
     public boolean hasMatch(DualScanner scanner, DualDatabase database, String input) {
         JavaCppScanner s = (JavaCppScanner) scanner;
+        s.requireOpen();
         JavaCppWrapperDatabase db = (JavaCppWrapperDatabase) database;
-        return s.scanner.hasMatch(db.database, input);
+        try (JavaCppDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            return s.scanner.hasMatch(db.database, input);
+        }
     }
 
     @Override
     public boolean hasMatch(DualScanner scanner, DualDatabase database, byte[] input) {
         JavaCppScanner s = (JavaCppScanner) scanner;
+        s.requireOpen();
         JavaCppWrapperDatabase db = (JavaCppWrapperDatabase) database;
-        return s.scanner.hasMatch(db.database, input);
+        try (JavaCppDatabaseOperation ignored = acquireDatabaseOperation(database)) {
+            return s.scanner.hasMatch(db.database, input);
+        }
     }
 
     @Override
     public DualStream openStream(DualDatabase database) {
-        hs_database_t db = nativeDatabase(database);
-        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb
-                ? nativeDb.expressions : List.of();
-        try (PointerPointer<hs_stream_t> streamOut = new PointerPointer<>(1)) {
-            streamOut.put(0, new hs_stream_t());
-            checkResult(hyperscan.hs_open_stream(db, 0, streamOut));
-            hs_stream_t stream = streamOut.get(hs_stream_t.class);
-            try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
-                scratchOut.put(0, new hs_scratch_t());
-                checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
-                hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
-                return new JavaCppStream(stream, scratch, expressions);
+        acquireDatabaseStreamLease(database);
+        boolean transferred = false;
+        try {
+            hs_database_t db = nativeDatabase(database);
+            List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb
+                    ? nativeDb.expressions : List.of();
+            try (PointerPointer<hs_stream_t> streamOut = new PointerPointer<>(1)) {
+                streamOut.put(0, (hs_stream_t) null);
+                checkResult(hyperscan.hs_open_stream(db, 0, streamOut));
+                hs_stream_t stream = streamOut.get(hs_stream_t.class);
+                hs_scratch_t scratch = null;
+                try {
+                    try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
+                        scratchOut.put(0, (hs_scratch_t) null);
+                        checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
+                        scratch = scratchOut.get(hs_scratch_t.class);
+                        JavaCppStream result = new JavaCppStream(
+                                stream, new JavaCppScratchState(scratch), expressions, database);
+                        transferred = true;
+                        return result;
+                    }
+                } catch (RuntimeException | Error e) {
+                    if (scratch != null && !scratch.isNull()) {
+                        hyperscan.hs_free_scratch(scratch);
+                    }
+                    hyperscan.hs_close_stream(stream, null, null, null);
+                    throw e;
+                }
+            }
+        } finally {
+            if (!transferred) {
+                releaseDatabaseStreamLease(database);
             }
         }
     }
@@ -564,144 +837,167 @@ public class JavaCppAdapter implements DualApi {
     @Override
     public void scanStream(DualScanner scanner, DualStream stream, byte[] input, DualByteMatchHandler handler) {
         JavaCppStream s = (JavaCppStream) stream;
-        if (s.closed) {
-            throw new IllegalStateException("Stream is already closed");
-        }
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
-        }
+        hs_stream_t nativeStream = s.beginOperation();
         try (BytePointer data = newBytePointer(input)) {
-            int length = input == null ? 4 : input.length;
-            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? null : MATCH_HANDLER, null);
-            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
-                checkResult(result);
+            hs_scratch_t scratch = streamScratch(scanner, s);
+            if (handler != null) {
+                STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            }
+            try {
+                int length = input == null ? 4 : input.length;
+                int result = propagateHandlerFailure(hyperscan.hs_scan_stream(
+                        nativeStream, data, length, 0, scratch,
+                        handler == null ? null : MATCH_HANDLER, null));
+                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                    checkResult(result);
+                }
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
             }
         } finally {
-            if (handler != null) {
-                STREAM_CALLBACK.remove();
-            }
+            s.endOperation();
         }
     }
 
     @Override
     public void scanStream(DualScanner scanner, DualStream stream, ByteBuffer input, DualByteMatchHandler handler) {
         JavaCppStream s = (JavaCppStream) stream;
-        if (s.closed) {
-            throw new IllegalStateException("Stream is already closed");
-        }
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
-        }
+        hs_stream_t nativeStream = s.beginOperation();
         try (BytePointer data = newBytePointer(input)) {
-            int length = input == null ? 4 : input.remaining();
-            int result = hyperscan.hs_scan_stream(s.stream, data, length, 0, s.scratch, handler == null ? null : MATCH_HANDLER, null);
-            if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
-                checkResult(result);
+            hs_scratch_t scratch = streamScratch(scanner, s);
+            if (handler != null) {
+                STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+            }
+            try {
+                int length = input == null ? 4 : input.remaining();
+                int result = propagateHandlerFailure(hyperscan.hs_scan_stream(
+                        nativeStream, data, length, 0, scratch,
+                        handler == null ? null : MATCH_HANDLER, null));
+                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                    checkResult(result);
+                }
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
             }
         } finally {
-            if (handler != null) {
-                STREAM_CALLBACK.remove();
-            }
+            s.endOperation();
         }
     }
 
     @Override
     public void closeStream(DualScanner scanner, DualStream stream, DualByteMatchHandler handler) {
         JavaCppStream s = (JavaCppStream) stream;
-        if (s.closed) {
+        if (s.isClosed()) {
+            s.close();
             return;
         }
-        s.closed = true;
         if (handler != null) {
             STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try {
-            int result = hyperscan.hs_close_stream(s.stream, s.scratch, MATCH_HANDLER, null);
+            int result = propagateHandlerFailure(
+                    s.closeNative(streamScratch(scanner, s),
+                            handler == null ? null : MATCH_HANDLER, false));
             if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
                 checkResult(result);
             }
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                restoreHandlerContext();
             }
-            checkResult(hyperscan.hs_free_scratch(s.scratch));
         }
     }
 
     @Override
     public void scanVector(DualScanner scanner, DualDatabase database, byte[][] input, DualByteMatchHandler handler) {
-        hs_database_t db = nativeDatabase(database);
-        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+        if (input == null) {
+            throw new IllegalArgumentException("Input vector is null");
         }
-        int[] lengths = new int[input.length];
-        for (int i = 0; i < input.length; i++) {
-            lengths[i] = input[i].length;
-        }
-        try (PointerPointer<BytePointer> data = new PointerPointer<>(input);
-             IntPointer lengthPtr = new IntPointer(lengths);
-             PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
-            scratchOut.put(0, new hs_scratch_t());
-            checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
-            hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
+        try (JavaCppDatabaseOperation operation = acquireDatabaseOperation(database);
+             JavaCppVectorScratch scratchUse = acquireVectorScratch(scanner, operation.database)) {
+            hs_database_t db = operation.database;
+            hs_scratch_t scratch = scratchUse.scratch;
+            List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
+            int[] lengths = new int[input.length];
+            for (int i = 0; i < input.length; i++) {
+                lengths[i] = input[i] == null ? 4 : input[i].length;
+            }
+            BytePointer[] pointers = new BytePointer[input.length];
+            if (handler != null) {
+                STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            }
             try {
-                int result = hyperscan.hs_scan_vector(db, data, lengthPtr, input.length, 0, scratch, MATCH_HANDLER, null);
-                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
-                    checkResult(result);
+                for (int i = 0; i < input.length; i++) {
+                    pointers[i] = input[i] == null ? new BytePointer() : new BytePointer(input[i]);
+                }
+                try (PointerPointer<BytePointer> data = new PointerPointer<>(pointers);
+                     IntPointer lengthPtr = new IntPointer(lengths)) {
+                    int result = propagateHandlerFailure(hyperscan.hs_scan_vector(
+                            db, data, lengthPtr, input.length, 0, scratch,
+                            handler == null ? null : MATCH_HANDLER, null));
+                    if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                        checkResult(result);
+                    }
                 }
             } finally {
-                checkResult(hyperscan.hs_free_scratch(scratch));
-            }
-        } finally {
-            if (handler != null) {
-                STREAM_CALLBACK.remove();
+                for (BytePointer pointer : pointers) {
+                    if (pointer != null) {
+                        pointer.close();
+                    }
+                }
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
             }
         }
     }
 
     @Override
     public void scanVector(DualScanner scanner, DualDatabase database, ByteBuffer[] input, DualByteMatchHandler handler) {
-        hs_database_t db = nativeDatabase(database);
-        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
-        }
-        int n = input == null ? 0 : input.length;
-        int[] lengths = new int[n];
-        BytePointer[] pointers = new BytePointer[n];
-        for (int i = 0; i < n; i++) {
-            ByteBuffer buffer = input[i];
-            if (buffer == null) {
-                lengths[i] = 4;
-                pointers[i] = new BytePointer();
-            } else {
-                lengths[i] = buffer.remaining();
-                pointers[i] = newBytePointer(buffer);
+        try (JavaCppDatabaseOperation operation = acquireDatabaseOperation(database);
+             JavaCppVectorScratch scratchUse = acquireVectorScratch(scanner, operation.database)) {
+            hs_database_t db = operation.database;
+            hs_scratch_t scratch = scratchUse.scratch;
+            List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
+            int n = input == null ? 0 : input.length;
+            int[] lengths = new int[n];
+            BytePointer[] pointers = new BytePointer[n];
+            if (handler != null) {
+                STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
             }
-        }
-        try (PointerPointer<BytePointer> data = new PointerPointer<>(pointers);
-             IntPointer lengthPtr = new IntPointer(lengths);
-             PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
-            scratchOut.put(0, new hs_scratch_t());
-            checkResult(hyperscan.hs_alloc_scratch(db, scratchOut));
-            hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
             try {
-                int result = hyperscan.hs_scan_vector(db, data, lengthPtr, n, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-                if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
-                    checkResult(result);
+                for (int i = 0; i < n; i++) {
+                    ByteBuffer buffer = input[i];
+                    if (buffer == null) {
+                        lengths[i] = 4;
+                        pointers[i] = new BytePointer();
+                    } else {
+                        lengths[i] = buffer.remaining();
+                        pointers[i] = newBytePointer(buffer);
+                    }
+                }
+                try (PointerPointer<BytePointer> data = new PointerPointer<>(pointers);
+                     IntPointer lengthPtr = new IntPointer(lengths)) {
+                    int result = propagateHandlerFailure(hyperscan.hs_scan_vector(
+                            db, data, lengthPtr, n, 0, scratch,
+                            handler == null ? null : MATCH_HANDLER, null));
+                    if (result != 0 && result != hyperscan.HS_SCAN_TERMINATED) {
+                        checkResult(result);
+                    }
                 }
             } finally {
-                checkResult(hyperscan.hs_free_scratch(scratch));
-            }
-        } finally {
-            for (BytePointer bp : pointers) {
-                if (bp != null) {
-                    bp.close();
+                for (BytePointer bp : pointers) {
+                    if (bp != null) {
+                        bp.close();
+                    }
                 }
-            }
-            if (handler != null) {
-                STREAM_CALLBACK.remove();
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
             }
         }
     }
@@ -715,12 +1011,14 @@ public class JavaCppAdapter implements DualApi {
     public String getSerializedDatabaseInfo(byte[] data) {
         try (BytePointer bp = new BytePointer(data);
              PointerPointer<BytePointer> info = new PointerPointer<>(1)) {
-            info.put(0, new BytePointer());
+            info.put(0, (BytePointer) null);
             checkResult(hyperscan.hs_serialized_database_info(bp, data.length, info));
             BytePointer infoPtr = info.get(BytePointer.class);
-            String result = infoPtr.getString();
-            Pointer.free(infoPtr);
-            return result;
+            try {
+                return infoPtr.getString(StandardCharsets.UTF_8);
+            } finally {
+                freeMiscPointer(infoPtr);
+            }
         }
     }
 
@@ -737,15 +1035,21 @@ public class JavaCppAdapter implements DualApi {
         }
         JavaCppNativeDatabase nativeDb = (JavaCppNativeDatabase) database;
         try (SizeTPointer size = new SizeTPointer(1);
-             BytePointer bytes = new BytePointer(1)) {
+             PointerPointer<BytePointer> bytesOut = new PointerPointer<>(1)) {
             size.put(0, 0);
-            checkResult(hyperscan.hs_serialize_database(nativeDb.database, bytes, size));
+            bytesOut.put(0, (BytePointer) null);
+            checkResult(hyperscan.hs_serialize_database(nativeDb.requireDatabase(), bytesOut, size));
             long length = size.get();
-            bytes.capacity(length);
-            java.nio.ByteBuffer buffer = bytes.asBuffer();
-            byte[] out = new byte[(int) length];
-            buffer.get(out);
-            return out;
+            BytePointer bytes = bytesOut.get(BytePointer.class);
+            try {
+                bytes.capacity(length);
+                java.nio.ByteBuffer buffer = bytes.asBuffer();
+                byte[] out = new byte[(int) length];
+                buffer.get(out);
+                return out;
+            } finally {
+                freeMiscPointer(bytes);
+            }
         }
     }
 
@@ -761,7 +1065,7 @@ public class JavaCppAdapter implements DualApi {
     private static DualDatabase deserializeNative(byte[] data) {
         try (BytePointer bp = new BytePointer(data);
              PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1)) {
-            dbOut.put(0, new hs_database_t());
+            dbOut.put(0, (hs_database_t) null);
             checkResult(hyperscan.hs_deserialize_database(bp, data.length, dbOut));
             hs_database_t db = dbOut.get(hs_database_t.class);
             return new JavaCppNativeDatabase(db, List.of());
@@ -776,9 +1080,9 @@ public class JavaCppAdapter implements DualApi {
     @Override
     public void closeDatabase(DualDatabase database) {
         if (database instanceof JavaCppWrapperDatabase wrapper) {
-            wrapper.database.close();
+            wrapper.close();
         } else if (database instanceof JavaCppNativeDatabase nativeDb) {
-            checkResult(hyperscan.hs_free_database(nativeDb.database));
+            nativeDb.close();
         } else if (database instanceof JavaCppRawDatabase rawDb) {
             rawDb.close();
         }
@@ -789,16 +1093,12 @@ public class JavaCppAdapter implements DualApi {
         if (database instanceof JavaCppWrapperDatabase wrapper) {
             return wrapper.database.getSize();
         }
-        JavaCppNativeDatabase nativeDb = (JavaCppNativeDatabase) database;
-        try (SizeTPointer size = new SizeTPointer(1)) {
-            checkResult(hyperscan.hs_database_size(nativeDb.database, size));
-            return size.get();
-        }
+        return database.getSize();
     }
 
     @Override
     public long getScannerSize(DualScanner scanner) {
-        return ((JavaCppScanner) scanner).scanner.getSize();
+        return scanner.getSize();
     }
 
     @Override
@@ -808,6 +1108,21 @@ public class JavaCppAdapter implements DualApi {
 
     @Override
     public String getPlatform() {
+        try {
+            Class<?> loader = Class.forName("com.gliwka.hyperscan.jni.HyperscanNativeLoader");
+            Object platform = loader.getMethod("getLoadedPlatform").invoke(null);
+            if (platform instanceof String && !((String) platform).isEmpty()) {
+                return (String) platform;
+            }
+        } catch (ClassNotFoundException | NoSuchMethodException ignored) {
+            // Upstream and older fork artifacts do not expose the selected tier.
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+        String requestedPlatform = System.getProperty("org.bytedeco.javacpp.platform");
+        if (requestedPlatform != null && !requestedPlatform.isBlank()) {
+            return requestedPlatform;
+        }
         return Loader.getPlatform();
     }
 
@@ -932,11 +1247,11 @@ public class JavaCppAdapter implements DualApi {
 
     @Override
     public DualCompileResult compileRaw(String pattern, int flags, int mode) {
-        try (PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
+        try (BytePointer expr = utf8CString(pattern);
+             PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
              PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
-            dbOut.put(0, new hs_database_t());
-            errOut.put(0, new hs_compile_error_t());
-            BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
+            dbOut.put(0, (hs_database_t) null);
+            errOut.put(0, (hs_compile_error_t) null);
             int result = (int) HsLibrary.HS_COMPILE.invokeExact(toSegment(expr), flags, mode, MemorySegment.NULL, toSegment(dbOut), toSegment(errOut));
             return buildCompileResult(result, dbOut, errOut, pattern == null ? List.of() : List.of(new DualExpression(pattern, EnumSet.noneOf(DualExpressionFlag.class), 0)));
         } catch (Throwable e) {
@@ -946,14 +1261,14 @@ public class JavaCppAdapter implements DualApi {
 
     @Override
     public DualCompileResult compileRaw(String pattern, int flags, int mode, DualPlatformInfo platform) {
-        try (PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
+        try (BytePointer expr = utf8CString(pattern);
+             PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
              PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1);
              hs_platform_info_t plat = new hs_platform_info_t()) {
-            dbOut.put(0, new hs_database_t());
-            errOut.put(0, new hs_compile_error_t());
+            dbOut.put(0, (hs_database_t) null);
+            errOut.put(0, (hs_compile_error_t) null);
             plat.tune(platform.tune());
             plat.cpu_features(platform.cpuFeatures());
-            BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
             int result = (int) HsLibrary.HS_COMPILE.invokeExact(toSegment(expr), flags, mode, toSegment(plat), toSegment(dbOut), toSegment(errOut));
             return buildCompileResult(result, dbOut, errOut, pattern == null ? List.of() : List.of(new DualExpression(pattern, EnumSet.noneOf(DualExpressionFlag.class), 0)));
         } catch (Throwable e) {
@@ -963,21 +1278,21 @@ public class JavaCppAdapter implements DualApi {
 
     @Override
     public DualCompileResult compileExtRaw(String pattern, int flags, DualExpressionExt ext, int mode) {
-        try (PointerPointer<BytePointer> exprPtr = new PointerPointer<>(1);
+        try (BytePointer expr = utf8CString(pattern);
+             PointerPointer<BytePointer> exprPtr = new PointerPointer<>(1);
              IntPointer flagsPtr = new IntPointer(1);
              IntPointer idsPtr = new IntPointer(1);
              hs_expr_ext_t extStruct = new hs_expr_ext_t();
              PointerPointer<hs_expr_ext_t> extPtr = new PointerPointer<>(1);
              PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
              PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
-            BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
             exprPtr.put(0, expr);
             flagsPtr.put(0, flags);
             idsPtr.put(0, 0);
             applyExprExt(extStruct, ext);
             extPtr.put(0, extStruct);
-            dbOut.put(0, new hs_database_t());
-            errOut.put(0, new hs_compile_error_t());
+            dbOut.put(0, (hs_database_t) null);
+            errOut.put(0, (hs_compile_error_t) null);
             int result = hyperscan.hs_compile_ext_multi(exprPtr, flagsPtr, idsPtr, extPtr, 1, mode, null, dbOut, errOut);
             return buildCompileResult(result, dbOut, errOut, pattern == null ? List.of() : List.of(new DualExpression(pattern, EnumSet.noneOf(DualExpressionFlag.class), 0)));
         }
@@ -988,13 +1303,11 @@ public class JavaCppAdapter implements DualApi {
             return new DualCompileResult(0, new JavaCppNativeDatabase(dbOut.get(hs_database_t.class), List.copyOf(expressions)), null);
         }
         hs_compile_error_t err = errOut.get(hs_compile_error_t.class);
-        String message = err != null && err.message() != null ? err.message().getString() : null;
         try {
-            int ignored = (int) HsLibrary.HS_FREE_COMPILE_ERROR.invokeExact(toSegment(err));
-        } catch (Throwable e) {
-            throw new RuntimeException(e);
+            return new DualCompileResult(result, null, compileErrorMessage(err));
+        } finally {
+            freeCompileErrorDirect(err);
         }
-        return new DualCompileResult(result, null, message);
     }
 
     @Override
@@ -1014,31 +1327,39 @@ public class JavaCppAdapter implements DualApi {
         IntPointer flags = null;
         IntPointer ids = null;
         List<BytePointer> exprPointers = new ArrayList<>();
-        if (n > 0) {
-            expressionsPtr = new PointerPointer<>(n);
-            flags = new IntPointer(n);
-            ids = new IntPointer(n);
-            for (int i = 0; i < n; i++) {
-                DualExpression expr = expressions.get(i);
-                BytePointer bp = new BytePointer(expr.pattern());
-                exprPointers.add(bp);
-                expressionsPtr.put(i, bp);
-                flags.put(i, toFlagBits(expr.flags()));
-                ids.put(i, expr.id() != null ? expr.id() : 0);
+        try {
+            if (n > 0) {
+                expressionsPtr = new PointerPointer<>(n);
+                flags = new IntPointer(n);
+                ids = new IntPointer(n);
+                for (int i = 0; i < n; i++) {
+                    DualExpression expr = expressions.get(i);
+                    BytePointer bp = utf8CString(expr.pattern());
+                    exprPointers.add(bp);
+                    expressionsPtr.put(i, bp);
+                    flags.put(i, toFlagBits(expr.flags()));
+                    ids.put(i, expr.id() != null ? expr.id() : 0);
+                }
             }
-        }
-        try (PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
-             PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
-            dbOut.put(0, new hs_database_t());
-            errOut.put(0, new hs_compile_error_t());
-            int result = hyperscan.hs_compile_multi(expressionsPtr, flags, ids, n, mode, null, dbOut, errOut);
-            if (result == 0) {
-                return new DualCompileResult(0, new JavaCppNativeDatabase(dbOut.get(hs_database_t.class), List.copyOf(expressions)), null);
+            try (PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
+                 PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
+                dbOut.put(0, (hs_database_t) null);
+                errOut.put(0, (hs_compile_error_t) null);
+                int result = hyperscan.hs_compile_multi(expressionsPtr, flags, ids, n, mode, null, dbOut, errOut);
+                return buildCompileResult(result, dbOut, errOut,
+                        expressions == null ? List.of() : expressions);
             }
-            hs_compile_error_t err = errOut.get(hs_compile_error_t.class);
-            String message = err != null && err.message() != null ? err.message().getString() : null;
-            hyperscan.hs_free_compile_error(err);
-            return new DualCompileResult(result, null, message);
+        } finally {
+            closePointers(exprPointers);
+            if (ids != null) {
+                ids.close();
+            }
+            if (flags != null) {
+                flags.close();
+            }
+            if (expressionsPtr != null) {
+                expressionsPtr.close();
+            }
         }
     }
 
@@ -1050,10 +1371,11 @@ public class JavaCppAdapter implements DualApi {
         IntPointer idsPtr = null;
         List<BytePointer> exprPointers = new ArrayList<>();
         List<DualExpression> expressions = new ArrayList<>(n);
+        try {
             if (patterns != null) {
                 expressionsPtr = new PointerPointer<>(n);
                 for (int i = 0; i < n; i++) {
-                    BytePointer expr = patterns[i] == null ? new BytePointer() : new BytePointer(patterns[i]);
+                    BytePointer expr = utf8CString(patterns[i]);
                     exprPointers.add(expr);
                     expressionsPtr.put(i, expr);
                     expressions.add(new DualExpression(patterns[i] != null ? patterns[i] : "", EnumSet.noneOf(DualExpressionFlag.class), ids != null ? ids[i] : 0));
@@ -1062,27 +1384,39 @@ public class JavaCppAdapter implements DualApi {
                 idsPtr = ids == null ? null : new IntPointer(ids);
             }
 
-        try (PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
-             PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
-            hs_database_t dbPlaceholder = new hs_database_t();
-            hs_compile_error_t errPlaceholder = new hs_compile_error_t();
-            dbOut.put(0, dbPlaceholder);
-            errOut.put(0, errPlaceholder);
-            int result = hyperscan.hs_compile_multi(expressionsPtr, flagsPtr, idsPtr, n, mode, null, dbOut, errOut);
-            return buildCompileResult(result, dbOut, errOut, expressions);
+            try (PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
+                 PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
+                dbOut.put(0, (hs_database_t) null);
+                errOut.put(0, (hs_compile_error_t) null);
+                int result = hyperscan.hs_compile_multi(expressionsPtr, flagsPtr, idsPtr, n, mode, null, dbOut, errOut);
+                return buildCompileResult(result, dbOut, errOut, expressions);
+            }
+        } finally {
+            closePointers(exprPointers);
+            if (idsPtr != null) {
+                idsPtr.close();
+            }
+            if (flagsPtr != null) {
+                flagsPtr.close();
+            }
+            if (expressionsPtr != null) {
+                expressionsPtr.close();
+            }
         }
     }
 
     @Override
     public DualCompileResult compileNullOutputRaw(String pattern, int flags, int mode) {
-        try (PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
-            errOut.put(0, new hs_compile_error_t());
-            BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
+        try (BytePointer expr = utf8CString(pattern);
+             PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
+            errOut.put(0, (hs_compile_error_t) null);
             int result = hyperscan.hs_compile(expr, flags, mode, null, (PointerPointer<hs_database_t>) null, errOut);
             hs_compile_error_t err = errOut.get(hs_compile_error_t.class);
-            String message = err != null && err.message() != null ? err.message().getString() : null;
-            hyperscan.hs_free_compile_error(err);
-            return new DualCompileResult(result, null, message);
+            try {
+                return new DualCompileResult(result, null, compileErrorMessage(err));
+            } finally {
+                hyperscan.hs_free_compile_error(err);
+            }
         }
     }
 
@@ -1093,24 +1427,42 @@ public class JavaCppAdapter implements DualApi {
         IntPointer flagsPtr = null;
         IntPointer idsPtr = null;
         List<BytePointer> exprPointers = new ArrayList<>();
-        if (patterns != null) {
-            expressionsPtr = new PointerPointer<>(n);
-            for (int i = 0; i < n; i++) {
-                BytePointer expr = patterns[i] == null ? new BytePointer() : new BytePointer(patterns[i]);
-                exprPointers.add(expr);
-                expressionsPtr.put(i, expr);
+        try {
+            if (patterns != null) {
+                expressionsPtr = new PointerPointer<>(n);
+                for (int i = 0; i < n; i++) {
+                    BytePointer expr = utf8CString(patterns[i]);
+                    exprPointers.add(expr);
+                    expressionsPtr.put(i, expr);
+                }
+                flagsPtr = flags == null ? null : new IntPointer(flags);
+                idsPtr = ids == null ? null : new IntPointer(ids);
             }
-            flagsPtr = flags == null ? null : new IntPointer(flags);
-            idsPtr = ids == null ? null : new IntPointer(ids);
-        }
-        try (PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
-            hs_compile_error_t errPlaceholder = new hs_compile_error_t();
-            errOut.put(0, errPlaceholder);
-            int result = hyperscan.hs_compile_multi(expressionsPtr, flagsPtr, idsPtr, n, mode, null, (PointerPointer<hs_database_t>) null, errOut);
-            hs_compile_error_t err = errOut.get(hs_compile_error_t.class);
-            String message = err != null && err.message() != null ? err.message().getString() : null;
-            hyperscan.hs_free_compile_error(err);
-            return new DualCompileResult(result, null, message);
+            try (PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
+                errOut.put(0, (hs_compile_error_t) null);
+                int result = hyperscan.hs_compile_multi(expressionsPtr, flagsPtr, idsPtr, n, mode, null,
+                        (PointerPointer<hs_database_t>) null, errOut);
+                hs_compile_error_t err = errOut.get(hs_compile_error_t.class);
+                try {
+                    String message = err != null && err.message() != null
+                            ? err.message().getString(StandardCharsets.UTF_8)
+                            : null;
+                    return new DualCompileResult(result, null, message);
+                } finally {
+                    hyperscan.hs_free_compile_error(err);
+                }
+            }
+        } finally {
+            closePointers(exprPointers);
+            if (idsPtr != null) {
+                idsPtr.close();
+            }
+            if (flagsPtr != null) {
+                flagsPtr.close();
+            }
+            if (expressionsPtr != null) {
+                expressionsPtr.close();
+            }
         }
     }
 
@@ -1123,7 +1475,7 @@ public class JavaCppAdapter implements DualApi {
              PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1)) {
             bp.put(data);
             bp.position(0);
-            dbOut.put(0, new hs_database_t());
+            dbOut.put(0, (hs_database_t) null);
             int result = (int) HsLibrary.HS_DESERIALIZE_DATABASE.invokeExact(toSegment(bp), (long) data.length, toSegment(dbOut));
             if (result == 0) {
                 return DualResult.success(new JavaCppNativeDatabase(dbOut.get(hs_database_t.class), List.of()));
@@ -1164,11 +1516,11 @@ public class JavaCppAdapter implements DualApi {
     public DualDatabase allocateRawDatabase(long size) {
         BytePointer memory = new BytePointer(size);
         if ((memory.address() & 7L) != 0) {
-            Pointer.free(memory);
+            memory.close();
             throw new RuntimeException("Raw database memory is not 8-byte aligned");
         }
         hs_database_t database = new hs_database_t(memory);
-        return new JavaCppRawDatabase(database, memory, true);
+        return new JavaCppRawDatabase(database, new JavaCppRawDatabaseState(memory), true);
     }
 
     private static final class OffsetPointer extends Pointer {
@@ -1182,8 +1534,8 @@ public class JavaCppAdapter implements DualApi {
         if (!(database instanceof JavaCppRawDatabase raw)) {
             throw new IllegalArgumentException("Not a raw database: " + database.getClass());
         }
-        hs_database_t db = new hs_database_t(new OffsetPointer(raw.memory.address() + offset));
-        return new JavaCppRawDatabase(db, raw.memory, false);
+        hs_database_t db = new hs_database_t(new OffsetPointer(raw.requireDatabase().address() + offset));
+        return new JavaCppRawDatabase(db, raw.state, false);
     }
 
     @Override
@@ -1192,13 +1544,15 @@ public class JavaCppAdapter implements DualApi {
             return DualResult.error(hyperscan.HS_INVALID);
         }
         try (PointerPointer<BytePointer> info = new PointerPointer<>(1)) {
-            info.put(0, new BytePointer());
+            info.put(0, (BytePointer) null);
             int result = (int) HsLibrary.HS_DATABASE_INFO.invokeExact(toSegment(nativeDatabase(database)), toSegment(info));
             if (result == 0) {
                 BytePointer infoPtr = info.get(BytePointer.class);
-                String value = infoPtr.getString();
-                Pointer.free(infoPtr);
-                return DualResult.success(value);
+                try {
+                    return DualResult.success(infoPtr.getString(StandardCharsets.UTF_8));
+                } finally {
+                    freeMiscPointer(infoPtr);
+                }
             }
             return DualResult.error(result);
         } catch (Throwable e) {
@@ -1215,13 +1569,15 @@ public class JavaCppAdapter implements DualApi {
              PointerPointer<BytePointer> info = new PointerPointer<>(1)) {
             bp.put(data);
             bp.position(0);
-            info.put(0, new BytePointer());
+            info.put(0, (BytePointer) null);
             int result = hyperscan.hs_serialized_database_info(bp, data.length, info);
             if (result == 0) {
                 BytePointer infoPtr = info.get(BytePointer.class);
-                String value = infoPtr.getString();
-                Pointer.free(infoPtr);
-                return DualResult.success(value);
+                try {
+                    return DualResult.success(infoPtr.getString(StandardCharsets.UTF_8));
+                } finally {
+                    freeMiscPointer(infoPtr);
+                }
             }
             return DualResult.error(result);
         }
@@ -1313,10 +1669,11 @@ public class JavaCppAdapter implements DualApi {
             return new DualScratchResult(hyperscan.HS_INVALID, null, null);
         }
         try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
-            scratchOut.put(0, new hs_scratch_t());
+            scratchOut.put(0, (hs_scratch_t) null);
             int result = (int) HsLibrary.HS_ALLOC_SCRATCH.invokeExact(toSegment(nativeDatabase(database)), toSegment(scratchOut));
             if (result == 0) {
-                return new DualScratchResult(0, new JavaCppRawScanner(scratchOut.get(hs_scratch_t.class)), null);
+                return new DualScratchResult(0,
+                        new JavaCppRawScanner(new JavaCppScratchState(scratchOut.get(hs_scratch_t.class)), true), null);
             }
             return new DualScratchResult(result, null, null);
         } catch (Throwable e) {
@@ -1329,11 +1686,24 @@ public class JavaCppAdapter implements DualApi {
         if (database == null) {
             return new DualScratchResult(hyperscan.HS_INVALID, null, null);
         }
+        if (existingScratch != null
+                && (!(existingScratch instanceof JavaCppRawScanner raw) || !raw.isOwner())) {
+            throw new IllegalArgumentException("Scratch is not an owning raw scratch");
+        }
         try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
             scratchOut.put(0, existingScratch == null ? null : nativeScratch(existingScratch));
             int result = hyperscan.hs_alloc_scratch(nativeDatabase(database), scratchOut);
             if (result == 0) {
-                return new DualScratchResult(0, new JavaCppRawScanner(scratchOut.get(hs_scratch_t.class)), null);
+                hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
+                if (existingScratch instanceof JavaCppRawScanner raw) {
+                    raw.replace(scratch);
+                    return new DualScratchResult(0, raw, null);
+                }
+                if (existingScratch != null) {
+                    throw new IllegalArgumentException("Unsupported scratch owner: " + existingScratch.getClass());
+                }
+                return new DualScratchResult(0,
+                        new JavaCppRawScanner(new JavaCppScratchState(scratch), true), null);
             }
             return new DualScratchResult(result, null, null);
         }
@@ -1359,10 +1729,11 @@ public class JavaCppAdapter implements DualApi {
         }
         hs_scratch_t src = nativeScratch(source);
         try (PointerPointer<hs_scratch_t> clonedOut = new PointerPointer<>(1)) {
-            clonedOut.put(0, new hs_scratch_t());
+            clonedOut.put(0, (hs_scratch_t) null);
             int result = hyperscan.hs_clone_scratch(src, clonedOut);
             if (result == 0) {
-                return new DualScratchResult(0, new JavaCppRawScanner(clonedOut.get(hs_scratch_t.class)), null);
+                return new DualScratchResult(0,
+                        new JavaCppRawScanner(new JavaCppScratchState(clonedOut.get(hs_scratch_t.class)), true), null);
             }
             return new DualScratchResult(result, null, null);
         }
@@ -1373,31 +1744,54 @@ public class JavaCppAdapter implements DualApi {
         if (database == null) {
             return new DualStreamResult(hyperscan.HS_INVALID, null, null);
         }
-        hs_database_t db = nativeDatabase(database);
-        try (PointerPointer<hs_stream_t> streamOut = new PointerPointer<>(1)) {
-            streamOut.put(0, new hs_stream_t());
-            int result = hyperscan.hs_open_stream(db, 0, streamOut);
-            if (result != 0) {
-                return new DualStreamResult(result, null, null);
-            }
-            hs_stream_t stream = streamOut.get(hs_stream_t.class);
-            try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
-                scratchOut.put(0, new hs_scratch_t());
-                int allocResult = hyperscan.hs_alloc_scratch(db, scratchOut);
-                if (allocResult != 0) {
-                    hyperscan.hs_close_stream(stream, null, null, null);
-                    return new DualStreamResult(allocResult, null, null);
+        acquireDatabaseStreamLease(database);
+        boolean transferred = false;
+        try {
+            hs_database_t db = nativeDatabase(database);
+            try (PointerPointer<hs_stream_t> streamOut = new PointerPointer<>(1)) {
+                streamOut.put(0, (hs_stream_t) null);
+                int result = hyperscan.hs_open_stream(db, 0, streamOut);
+                if (result != 0) {
+                    return new DualStreamResult(result, null, null);
                 }
-                hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
-                List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
-                return new DualStreamResult(0, new JavaCppStream(stream, scratch, expressions), null);
+                hs_stream_t stream = streamOut.get(hs_stream_t.class);
+                hs_scratch_t scratch = null;
+                try {
+                    try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
+                        scratchOut.put(0, (hs_scratch_t) null);
+                        int allocResult = hyperscan.hs_alloc_scratch(db, scratchOut);
+                        if (allocResult != 0) {
+                            hyperscan.hs_close_stream(stream, null, null, null);
+                            return new DualStreamResult(allocResult, null, null);
+                        }
+                        scratch = scratchOut.get(hs_scratch_t.class);
+                        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb
+                                ? nativeDb.expressions : List.of();
+                        JavaCppStream opened = new JavaCppStream(
+                                stream, new JavaCppScratchState(scratch), expressions, database);
+                        DualStreamResult response = new DualStreamResult(0, opened, null);
+                        transferred = true;
+                        return response;
+                    }
+                } catch (RuntimeException | Error e) {
+                    if (scratch != null && !scratch.isNull()) {
+                        hyperscan.hs_free_scratch(scratch);
+                    }
+                    hyperscan.hs_close_stream(stream, null, null, null);
+                    throw e;
+                }
+            }
+        } finally {
+            if (!transferred) {
+                releaseDatabaseStreamLease(database);
             }
         }
     }
 
     @Override
     public DualScanner getStreamScratch(DualStream stream) {
-        return new JavaCppRawScanner(((JavaCppStream) stream).scratch);
+        JavaCppScratchState scratchState = ((JavaCppStream) stream).scratchState;
+        return scratchState == null ? null : new JavaCppRawScanner(scratchState, false);
     }
 
     @Override
@@ -1414,20 +1808,32 @@ public class JavaCppAdapter implements DualApi {
             return hyperscan.HS_INVALID;
         }
         JavaCppStream s = (JavaCppStream) stream;
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+        hs_stream_t nativeStream;
+        try {
+            nativeStream = s.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID;
         }
-        try (BytePointer data = input == null ? new BytePointer() : new BytePointer(input.length)) {
-            if (input != null) {
-                data.put(input);
-                data.position(0);
-            }
-            return hyperscan.hs_scan_stream(s.stream, data, input == null ? 4 : input.length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-        } finally {
+        try {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
             }
+            try (BytePointer data = input == null ? new BytePointer() : new BytePointer(input.length)) {
+                if (input != null) {
+                    data.put(input);
+                    data.position(0);
+                }
+                return propagateHandlerFailure(hyperscan.hs_scan_stream(
+                        nativeStream, data, input == null ? 4 : input.length, 0, scratch,
+                        handler == null ? null : MATCH_HANDLER, null));
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
+            }
+        } finally {
+            s.endOperation();
         }
     }
 
@@ -1437,21 +1843,20 @@ public class JavaCppAdapter implements DualApi {
             return hyperscan.HS_INVALID;
         }
         JavaCppStream s = (JavaCppStream) stream;
-        if (s.closed) {
+        if (s.isClosed()) {
             return hyperscan.HS_INVALID;
         }
-        s.closed = true;
         hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
         if (handler != null) {
             STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
         }
         try {
-            return hyperscan.hs_close_stream(s.stream, scratch, handler == null ? null : MATCH_HANDLER, null);
+            return propagateHandlerFailure(
+                    s.closeNative(scratch, handler == null ? null : MATCH_HANDLER, true));
         } finally {
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                restoreHandlerContext();
             }
-            hyperscan.hs_free_scratch(s.scratch);
         }
     }
 
@@ -1461,16 +1866,27 @@ public class JavaCppAdapter implements DualApi {
             return hyperscan.HS_INVALID;
         }
         JavaCppStream s = (JavaCppStream) stream;
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
+        hs_stream_t nativeStream;
+        try {
+            nativeStream = s.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID;
         }
         try {
-            return hyperscan.hs_reset_stream(s.stream, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-        } finally {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                STREAM_CALLBACK.set(newHandlerContext(handler, s.expressions));
             }
+            try {
+                return propagateHandlerFailure(hyperscan.hs_reset_stream(
+                        nativeStream, 0, scratch, handler == null ? null : MATCH_HANDLER, null));
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
+            }
+        } finally {
+            s.endOperation();
         }
     }
 
@@ -1480,14 +1896,38 @@ public class JavaCppAdapter implements DualApi {
             return hyperscan.HS_INVALID;
         }
         JavaCppStream src = (JavaCppStream) from;
-        try (PointerPointer<hs_stream_t> toOut = new PointerPointer<>(1)) {
-            toOut.put(0, new hs_stream_t());
-            int result = hyperscan.hs_copy_stream(toOut, src.stream);
-            if (result == 0) {
-                hs_stream_t copied = toOut.get(hs_stream_t.class);
-                to[0] = new JavaCppStream(copied, null, src.expressions);
+        hs_stream_t source;
+        try {
+            source = src.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID;
+        }
+        try {
+            acquireDatabaseStreamLease(src.databaseOwner);
+            boolean transferred = false;
+            try {
+                try (PointerPointer<hs_stream_t> toOut = new PointerPointer<>(1)) {
+                    toOut.put(0, (hs_stream_t) null);
+                    int result = hyperscan.hs_copy_stream(toOut, source);
+                    if (result == 0) {
+                        hs_stream_t copied = toOut.get(hs_stream_t.class);
+                        try {
+                            to[0] = new JavaCppStream(copied, null, src.expressions, src.databaseOwner);
+                            transferred = true;
+                        } catch (RuntimeException | Error e) {
+                            hyperscan.hs_close_stream(copied, null, null, null);
+                            throw e;
+                        }
+                    }
+                    return result;
+                }
+            } finally {
+                if (!transferred) {
+                    releaseDatabaseStreamLease(src.databaseOwner);
+                }
             }
-            return result;
+        } finally {
+            src.endOperation();
         }
     }
 
@@ -1501,15 +1941,37 @@ public class JavaCppAdapter implements DualApi {
         }
         JavaCppStream toStream = (JavaCppStream) to;
         JavaCppStream fromStream = (JavaCppStream) from;
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, toStream.expressions));
+        hs_stream_t destination;
+        try {
+            destination = toStream.beginOperation();
+        } catch (IllegalStateException e) {
+            return hyperscan.HS_INVALID;
+        }
+        hs_stream_t source;
+        try {
+            source = fromStream.beginOperation();
+        } catch (IllegalStateException e) {
+            toStream.endOperation();
+            return hyperscan.HS_INVALID;
         }
         try {
-            return hyperscan.hs_reset_and_copy_stream(toStream.stream, fromStream.stream, scratch, handler == null ? null : MATCH_HANDLER, null);
-        } finally {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                STREAM_CALLBACK.set(newHandlerContext(handler, toStream.expressions));
+            }
+            try {
+                return propagateHandlerFailure(hyperscan.hs_reset_and_copy_stream(
+                        destination, source, scratch, handler == null ? null : MATCH_HANDLER, null));
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
+            }
+        } finally {
+            try {
+                fromStream.endOperation();
+            } finally {
+                toStream.endOperation();
             }
         }
     }
@@ -1519,21 +1981,25 @@ public class JavaCppAdapter implements DualApi {
         if (database == null) {
             return hyperscan.HS_INVALID;
         }
-        hs_database_t db = nativeDatabase(database);
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
-        }
-        try (BytePointer data = input == null ? new BytePointer() : new BytePointer(input.length)) {
-            if (input != null) {
-                data.put(input);
-                data.position(0);
-            }
-            return hyperscan.hs_scan(db, data, input == null ? 4 : input.length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-        } finally {
+        try (JavaCppDatabaseOperation operation = acquireDatabaseOperation(database)) {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+            List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb
+                    ? nativeDb.expressions : List.of();
             if (handler != null) {
-                STREAM_CALLBACK.remove();
+                STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            }
+            try (BytePointer data = input == null ? new BytePointer() : new BytePointer(input.length)) {
+                if (input != null) {
+                    data.put(input);
+                    data.position(0);
+                }
+                return propagateHandlerFailure(hyperscan.hs_scan(
+                        operation.database, data, input == null ? 4 : input.length, 0, scratch,
+                        handler == null ? null : MATCH_HANDLER, null));
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
             }
         }
     }
@@ -1543,23 +2009,65 @@ public class JavaCppAdapter implements DualApi {
         if (database == null) {
             return hyperscan.HS_INVALID;
         }
-        hs_database_t db = nativeDatabase(database);
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
-        }
-        try {
-            if (input == null) {
-                return hyperscan.hs_scan_vector(db, (PointerPointer<BytePointer>) null, (IntPointer) null, 2, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
+        try (JavaCppDatabaseOperation operation = acquireDatabaseOperation(database)) {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+            List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb
+                    ? nativeDb.expressions : List.of();
+            if (handler != null) {
+                STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
             }
-            int[] lengths = new int[input.length];
-            for (int i = 0; i < input.length; i++) {
-                lengths[i] = input[i] == null ? 4 : input[i].length;
-            }
-            try (PointerPointer<BytePointer> data = new PointerPointer<>(input.length);
-                 IntPointer lengthPtr = new IntPointer(lengths)) {
+            try {
+                if (input == null) {
+                    return propagateHandlerFailure(hyperscan.hs_scan_vector(
+                            operation.database, (PointerPointer<BytePointer>) null,
+                            (IntPointer) null, 2, 0, scratch,
+                            handler == null ? null : MATCH_HANDLER, null));
+                }
+                int[] lengths = new int[input.length];
+                for (int i = 0; i < input.length; i++) {
+                    lengths[i] = input[i] == null ? 4 : input[i].length;
+                }
                 List<BytePointer> bpRefs = new ArrayList<>(input.length);
+                try (PointerPointer<BytePointer> data = new PointerPointer<>(input.length);
+                     IntPointer lengthPtr = new IntPointer(lengths)) {
+                    for (int i = 0; i < input.length; i++) {
+                        if (input[i] == null) {
+                            data.put(i, new BytePointer());
+                        } else {
+                            BytePointer bp = new BytePointer(input[i].length);
+                            bpRefs.add(bp);
+                            bp.put(input[i]);
+                            data.put(i, bp);
+                        }
+                    }
+                    return propagateHandlerFailure(hyperscan.hs_scan_vector(
+                            operation.database, data, lengthPtr, input.length, 0, scratch,
+                            handler == null ? null : MATCH_HANDLER, null));
+                } finally {
+                    closePointers(bpRefs);
+                }
+            } finally {
+                if (handler != null) {
+                    restoreHandlerContext();
+                }
+            }
+        }
+    }
+
+    @Override
+    public int scanVectorNoLenArrayRaw(DualScanner scanner, DualDatabase database, byte[][] input, DualByteMatchHandler handler) {
+        if (database == null) {
+            return hyperscan.HS_INVALID;
+        }
+        try (JavaCppDatabaseOperation operation = acquireDatabaseOperation(database)) {
+            hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
+            List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb
+                    ? nativeDb.expressions : List.of();
+            if (handler != null) {
+                STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
+            }
+            List<BytePointer> bpRefs = new ArrayList<>(input.length);
+            try (PointerPointer<BytePointer> data = new PointerPointer<>(input.length)) {
                 for (int i = 0; i < input.length; i++) {
                     if (input[i] == null) {
                         data.put(i, new BytePointer());
@@ -1570,42 +2078,17 @@ public class JavaCppAdapter implements DualApi {
                         data.put(i, bp);
                     }
                 }
-                return hyperscan.hs_scan_vector(db, data, lengthPtr, input.length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-            }
-        } finally {
-            if (handler != null) {
-                STREAM_CALLBACK.remove();
-            }
-        }
-    }
-
-    @Override
-    public int scanVectorNoLenArrayRaw(DualScanner scanner, DualDatabase database, byte[][] input, DualByteMatchHandler handler) {
-        if (database == null) {
-            return hyperscan.HS_INVALID;
-        }
-        hs_database_t db = nativeDatabase(database);
-        hs_scratch_t scratch = scanner == null ? null : nativeScratch(scanner);
-        List<DualExpression> expressions = database instanceof JavaCppNativeDatabase nativeDb ? nativeDb.expressions : List.of();
-        if (handler != null) {
-            STREAM_CALLBACK.set(newHandlerContext(handler, expressions));
-        }
-        try (PointerPointer<BytePointer> data = new PointerPointer<>(input.length)) {
-            List<BytePointer> bpRefs = new ArrayList<>(input.length);
-            for (int i = 0; i < input.length; i++) {
-                if (input[i] == null) {
-                    data.put(i, new BytePointer());
-                } else {
-                    BytePointer bp = new BytePointer(input[i].length);
-                    bpRefs.add(bp);
-                    bp.put(input[i]);
-                    data.put(i, bp);
+                return propagateHandlerFailure(hyperscan.hs_scan_vector(
+                        operation.database, data, (IntPointer) null, input.length, 0, scratch,
+                        handler == null ? null : MATCH_HANDLER, null));
+            } finally {
+                try {
+                    closePointers(bpRefs);
+                } finally {
+                    if (handler != null) {
+                        restoreHandlerContext();
+                    }
                 }
-            }
-            return hyperscan.hs_scan_vector(db, data, (IntPointer) null, input.length, 0, scratch, handler == null ? null : MATCH_HANDLER, null);
-        } finally {
-            if (handler != null) {
-                STREAM_CALLBACK.remove();
             }
         }
     }
@@ -1619,18 +2102,22 @@ public class JavaCppAdapter implements DualApi {
         try (SizeTPointer size = new SizeTPointer(1);
              PointerPointer<BytePointer> bytesOut = new PointerPointer<>(1)) {
             size.put(0, 0);
-            bytesOut.put(0, new BytePointer());
+            bytesOut.put(0, (BytePointer) null);
             int result = (int) HsLibrary.HS_SERIALIZE_DATABASE.invokeExact(toSegment(db), toSegment(bytesOut), toSegment(size));
             if (result != 0) {
                 return DualResult.error(result);
             }
             long length = size.get();
             BytePointer bytes = bytesOut.get(BytePointer.class);
-            bytes.capacity(length);
-            java.nio.ByteBuffer buffer = bytes.asBuffer();
-            byte[] out = new byte[(int) length];
-            buffer.get(out);
-            return DualResult.success(out);
+            try {
+                bytes.capacity(length);
+                java.nio.ByteBuffer buffer = bytes.asBuffer();
+                byte[] out = new byte[(int) length];
+                buffer.get(out);
+                return DualResult.success(out);
+            } finally {
+                freeMiscPointer(bytes);
+            }
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }
@@ -1679,7 +2166,17 @@ public class JavaCppAdapter implements DualApi {
         if (database == null) {
             return hyperscan.HS_SUCCESS;
         }
-        return hyperscan.hs_free_database(nativeDatabase(database));
+        if (database instanceof JavaCppNativeDatabase nativeDb) {
+            return nativeDb.free();
+        }
+        if (database instanceof JavaCppRawDatabase) {
+            return hyperscan.HS_INVALID;
+        }
+        if (database instanceof JavaCppWrapperDatabase wrapper) {
+            wrapper.close();
+            return hyperscan.HS_SUCCESS;
+        }
+        return hyperscan.HS_INVALID;
     }
 
     @Override
@@ -1687,7 +2184,10 @@ public class JavaCppAdapter implements DualApi {
         if (scanner == null) {
             return hyperscan.HS_SUCCESS;
         }
-        return hyperscan.hs_free_scratch(nativeScratch(scanner));
+        if (scanner instanceof JavaCppRawScanner raw) {
+            return raw.free();
+        }
+        return hyperscan.HS_INVALID;
     }
 
     @Override
@@ -1714,16 +2214,15 @@ public class JavaCppAdapter implements DualApi {
     }
 
     private static DualResult<String> expressionInfoInternal(String pattern, EnumSet<DualExpressionFlag> flags, boolean nullInfo, boolean nullErr) {
-        BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
-        PointerPointer<hs_expr_info_t> infoOut = nullInfo ? null : new PointerPointer<>(1);
-        PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1);
-        if (infoOut != null) {
-            infoOut.put(0, new hs_expr_info_t());
-        }
-        if (errOut != null) {
-            errOut.put(0, new hs_compile_error_t());
-        }
-        try {
+        try (BytePointer expr = utf8CString(pattern);
+             PointerPointer<hs_expr_info_t> infoOut = nullInfo ? null : new PointerPointer<>(1);
+             PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1)) {
+            if (infoOut != null) {
+                infoOut.put(0, (hs_expr_info_t) null);
+            }
+            if (errOut != null) {
+                errOut.put(0, (hs_compile_error_t) null);
+            }
             int result;
             try {
                 result = (int) HsLibrary.HS_EXPRESSION_INFO.invokeExact(toSegment(expr), toFlagBits(flags), toSegment(infoOut), toSegment(errOut));
@@ -1731,23 +2230,15 @@ public class JavaCppAdapter implements DualApi {
                 throw new RuntimeException(e);
             }
             hs_compile_error_t err = errOut == null ? null : errOut.get(hs_compile_error_t.class);
-            String message = err != null && err.message() != null ? err.message().getString() : null;
-            try {
-                int ignored = (int) HsLibrary.HS_FREE_COMPILE_ERROR.invokeExact(toSegment(err));
-            } catch (Throwable e) {
-                throw new RuntimeException(e);
-            }
             hs_expr_info_t info = infoOut == null ? null : infoOut.get(hs_expr_info_t.class);
-            if (info != null) {
-                Pointer.free(info);
-            }
-            return new DualResult<>(result, null, message);
-        } finally {
-            if (infoOut != null) {
-                infoOut.close();
-            }
-            if (errOut != null) {
-                errOut.close();
+            try {
+                return new DualResult<>(result, null, compileErrorMessage(err));
+            } finally {
+                try {
+                    freeCompileErrorDirect(err);
+                } finally {
+                    freeMiscPointer(info);
+                }
             }
         }
     }
@@ -1768,31 +2259,26 @@ public class JavaCppAdapter implements DualApi {
     }
 
     private static DualResult<String> expressionExtInfoInternal(String pattern, EnumSet<DualExpressionFlag> flags, boolean nullInfo, boolean nullErr) {
-        BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
-        PointerPointer<hs_expr_info_t> infoOut = nullInfo ? null : new PointerPointer<>(1);
-        PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1);
-        if (infoOut != null) {
-            infoOut.put(0, new hs_expr_info_t());
-        }
-        if (errOut != null) {
-            errOut.put(0, new hs_compile_error_t());
-        }
-        try {
-            int result = hyperscan.hs_expression_ext_info(expr, toFlagBits(flags), null, infoOut, errOut);
-            hs_compile_error_t err = errOut == null ? null : errOut.get(hs_compile_error_t.class);
-            String message = err != null && err.message() != null ? err.message().getString() : null;
-            hyperscan.hs_free_compile_error(err);
-            hs_expr_info_t info = infoOut == null ? null : infoOut.get(hs_expr_info_t.class);
-            if (info != null) {
-                Pointer.free(info);
-            }
-            return new DualResult<>(result, null, message);
-        } finally {
+        try (BytePointer expr = utf8CString(pattern);
+             PointerPointer<hs_expr_info_t> infoOut = nullInfo ? null : new PointerPointer<>(1);
+             PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1)) {
             if (infoOut != null) {
-                infoOut.close();
+                infoOut.put(0, (hs_expr_info_t) null);
             }
             if (errOut != null) {
-                errOut.close();
+                errOut.put(0, (hs_compile_error_t) null);
+            }
+            int result = hyperscan.hs_expression_ext_info(expr, toFlagBits(flags), null, infoOut, errOut);
+            hs_compile_error_t err = errOut == null ? null : errOut.get(hs_compile_error_t.class);
+            hs_expr_info_t info = infoOut == null ? null : infoOut.get(hs_expr_info_t.class);
+            try {
+                return new DualResult<>(result, null, compileErrorMessage(err));
+            } finally {
+                try {
+                    hyperscan.hs_free_compile_error(err);
+                } finally {
+                    freeMiscPointer(info);
+                }
             }
         }
     }
@@ -1808,79 +2294,69 @@ public class JavaCppAdapter implements DualApi {
     }
 
     private static DualResult<DualExpressionInfo> expressionInfoDataInternal(String pattern, EnumSet<DualExpressionFlag> flags, boolean nullErr) {
-        BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
-        PointerPointer<hs_expr_info_t> infoOut = new PointerPointer<>(1);
-        PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1);
-        infoOut.put(0, new hs_expr_info_t());
-        if (errOut != null) {
-            errOut.put(0, new hs_compile_error_t());
-        }
-        try {
+        try (BytePointer expr = utf8CString(pattern);
+             PointerPointer<hs_expr_info_t> infoOut = new PointerPointer<>(1);
+             PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1)) {
+            infoOut.put(0, (hs_expr_info_t) null);
+            if (errOut != null) {
+                errOut.put(0, (hs_compile_error_t) null);
+            }
             int result = hyperscan.hs_expression_info(expr, toFlagBits(flags), infoOut, errOut);
             hs_compile_error_t err = errOut == null ? null : errOut.get(hs_compile_error_t.class);
-            String message = err != null && err.message() != null ? err.message().getString() : null;
-            hyperscan.hs_free_compile_error(err);
             hs_expr_info_t info = infoOut.get(hs_expr_info_t.class);
-            DualExpressionInfo value = null;
-            if (result == 0 && info != null) {
-                value = new DualExpressionInfo(
-                        Integer.toUnsignedLong(info.min_width()),
-                        Integer.toUnsignedLong(info.max_width()),
-                        info.unordered_matches() != 0,
-                        info.matches_at_eod() != 0,
-                        info.matches_only_at_eod() != 0);
-            }
-            if (info != null) {
-                Pointer.free(info);
-            }
-            return new DualResult<>(result, value, message);
-        } finally {
-            infoOut.close();
-            if (errOut != null) {
-                errOut.close();
+            try {
+                DualExpressionInfo value = null;
+                if (result == 0 && info != null) {
+                    value = new DualExpressionInfo(
+                            Integer.toUnsignedLong(info.min_width()),
+                            Integer.toUnsignedLong(info.max_width()),
+                            info.unordered_matches() != 0,
+                            info.matches_at_eod() != 0,
+                            info.matches_only_at_eod() != 0);
+                }
+                return new DualResult<>(result, value, compileErrorMessage(err));
+            } finally {
+                try {
+                    hyperscan.hs_free_compile_error(err);
+                } finally {
+                    freeMiscPointer(info);
+                }
             }
         }
     }
 
     private static DualResult<DualExpressionInfo> expressionExtInfoDataInternal(String pattern, EnumSet<DualExpressionFlag> flags, DualExpressionExt ext, boolean nullErr) {
-        BytePointer expr = pattern == null ? new BytePointer() : new BytePointer(pattern);
-        hs_expr_ext_t extStruct = null;
-        if (ext != null) {
-            extStruct = newDefaultExprExt();
-            applyExprExt(extStruct, ext);
-        }
-        PointerPointer<hs_expr_info_t> infoOut = new PointerPointer<>(1);
-        PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1);
-        infoOut.put(0, new hs_expr_info_t());
-        if (errOut != null) {
-            errOut.put(0, new hs_compile_error_t());
-        }
-        try {
+        try (BytePointer expr = utf8CString(pattern);
+             hs_expr_ext_t extStruct = ext == null ? null : newDefaultExprExt();
+             PointerPointer<hs_expr_info_t> infoOut = new PointerPointer<>(1);
+             PointerPointer<hs_compile_error_t> errOut = nullErr ? null : new PointerPointer<>(1)) {
+            if (extStruct != null) {
+                applyExprExt(extStruct, ext);
+            }
+            infoOut.put(0, (hs_expr_info_t) null);
+            if (errOut != null) {
+                errOut.put(0, (hs_compile_error_t) null);
+            }
             int result = hyperscan.hs_expression_ext_info(expr, toFlagBits(flags), extStruct, infoOut, errOut);
             hs_compile_error_t err = errOut == null ? null : errOut.get(hs_compile_error_t.class);
-            String message = err != null && err.message() != null ? err.message().getString() : null;
-            hyperscan.hs_free_compile_error(err);
             hs_expr_info_t info = infoOut.get(hs_expr_info_t.class);
-            DualExpressionInfo value = null;
-            if (result == 0 && info != null) {
-                value = new DualExpressionInfo(
-                        Integer.toUnsignedLong(info.min_width()),
-                        Integer.toUnsignedLong(info.max_width()),
-                        info.unordered_matches() != 0,
-                        info.matches_at_eod() != 0,
-                        info.matches_only_at_eod() != 0);
-            }
-            if (info != null) {
-                Pointer.free(info);
-            }
-            return new DualResult<>(result, value, message);
-        } finally {
-            infoOut.close();
-            if (errOut != null) {
-                errOut.close();
-            }
-            if (extStruct != null) {
-                extStruct.close();
+            try {
+                DualExpressionInfo value = null;
+                if (result == 0 && info != null) {
+                    value = new DualExpressionInfo(
+                            Integer.toUnsignedLong(info.min_width()),
+                            Integer.toUnsignedLong(info.max_width()),
+                            info.unordered_matches() != 0,
+                            info.matches_at_eod() != 0,
+                            info.matches_only_at_eod() != 0);
+                }
+                return new DualResult<>(result, value, compileErrorMessage(err));
+            } finally {
+                try {
+                    hyperscan.hs_free_compile_error(err);
+                } finally {
+                    freeMiscPointer(info);
+                }
             }
         }
     }
@@ -1898,32 +2374,40 @@ public class JavaCppAdapter implements DualApi {
              PointerPointer<hs_expr_ext_t> extPtr = new PointerPointer<>(n);
              PointerPointer<hs_database_t> dbOut = new PointerPointer<>(1);
              PointerPointer<hs_compile_error_t> errOut = new PointerPointer<>(1)) {
-            hs_database_t dbPlaceholder = new hs_database_t();
-            hs_compile_error_t errPlaceholder = new hs_compile_error_t();
-            dbOut.put(0, dbPlaceholder);
-            errOut.put(0, errPlaceholder);
+            dbOut.put(0, (hs_database_t) null);
+            errOut.put(0, (hs_compile_error_t) null);
             List<BytePointer> exprPointers = new ArrayList<>(n);
             List<hs_expr_ext_t> exprExts = new ArrayList<>(n);
-            for (int i = 0; i < n; i++) {
-                DualExpression expr = expressions.get(i);
-                BytePointer exprPtr = new BytePointer(expr.pattern());
-                exprPointers.add(exprPtr);
-                expressionsPtr.put(i, exprPtr);
-                flags.put(i, toFlagBits(expr.flags()));
-                ids.put(i, expr.id() != null ? expr.id() : 0);
-                hs_expr_ext_t ext = newDefaultExprExt();
-                exprExts.add(ext);
-                extPtr.put(i, ext);
+            try {
+                for (int i = 0; i < n; i++) {
+                    DualExpression expr = expressions.get(i);
+                    BytePointer exprPtr = utf8CString(expr.pattern());
+                    exprPointers.add(exprPtr);
+                    expressionsPtr.put(i, exprPtr);
+                    flags.put(i, toFlagBits(expr.flags()));
+                    ids.put(i, expr.id() != null ? expr.id() : 0);
+                    hs_expr_ext_t ext = newDefaultExprExt();
+                    exprExts.add(ext);
+                    extPtr.put(i, ext);
+                }
+                int result = hyperscan.hs_compile_ext_multi(expressionsPtr, flags, ids, extPtr, n, mode, null, dbOut, errOut);
+                if (result != 0) {
+                    hs_compile_error_t err = errOut.get(hs_compile_error_t.class);
+                    try {
+                        String message = err != null && err.message() != null
+                                ? err.message().getString(StandardCharsets.UTF_8)
+                                : "unknown";
+                        throw new RuntimeException("Compile error: " + message);
+                    } finally {
+                        hyperscan.hs_free_compile_error(err);
+                    }
+                }
+                hs_database_t database = dbOut.get(hs_database_t.class);
+                return new JavaCppNativeDatabase(database, List.copyOf(expressions));
+            } finally {
+                closePointers(exprExts);
+                closePointers(exprPointers);
             }
-            int result = hyperscan.hs_compile_ext_multi(expressionsPtr, flags, ids, extPtr, n, mode, null, dbOut, errOut);
-            if (result != 0) {
-                hs_compile_error_t err = errOut.get(hs_compile_error_t.class);
-                String message = err != null && err.message() != null ? err.message().getString() : "unknown";
-                hyperscan.hs_free_compile_error(err);
-                throw new RuntimeException("Compile error: " + message);
-            }
-            hs_database_t database = dbOut.get(hs_database_t.class);
-            return new JavaCppNativeDatabase(database, List.copyOf(expressions));
         }
     }
 
@@ -1932,10 +2416,10 @@ public class JavaCppAdapter implements DualApi {
             return getNativeDatabaseHandle(wrapper.database);
         }
         if (database instanceof JavaCppNativeDatabase nativeDb) {
-            return nativeDb.database;
+            return nativeDb.requireDatabase();
         }
         if (database instanceof JavaCppRawDatabase rawDb) {
-            return rawDb.database;
+            return rawDb.requireDatabase();
         }
         throw new IllegalArgumentException("Unsupported database type: " + database.getClass());
     }
@@ -1955,12 +2439,57 @@ public class JavaCppAdapter implements DualApi {
             return null;
         }
         if (scanner instanceof JavaCppRawScanner raw) {
-            return raw.scratch;
+            return raw.requireScratch();
         }
         if (scanner instanceof JavaCppScanner wrapper) {
+            wrapper.requireOpen();
+            if (wrapper.nativeScratch != null) {
+                return wrapper.nativeScratch.require();
+            }
             return getNativeScratchHandle(wrapper.scanner);
         }
         throw new IllegalArgumentException("Unsupported scanner type: " + scanner.getClass());
+    }
+
+    private static hs_scratch_t streamScratch(DualScanner scanner, JavaCppStream stream) {
+        return stream.scratchState == null ? nativeScratch(scanner) : stream.scratch();
+    }
+
+    private static JavaCppVectorScratch acquireVectorScratch(DualScanner scanner, hs_database_t database) {
+        if (scanner instanceof JavaCppScanner wrapper) {
+            return new JavaCppVectorScratch(wrapper.reusableNativeScratch(database), false);
+        }
+        if (scanner != null) {
+            return new JavaCppVectorScratch(nativeScratch(scanner), false);
+        }
+        try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
+            scratchOut.put(0, (hs_scratch_t) null);
+            checkResult(hyperscan.hs_alloc_scratch(database, scratchOut));
+            hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
+            try {
+                return new JavaCppVectorScratch(scratch, true);
+            } catch (RuntimeException | Error e) {
+                hyperscan.hs_free_scratch(scratch);
+                throw e;
+            }
+        }
+    }
+
+    private static final class JavaCppVectorScratch implements AutoCloseable {
+        private final hs_scratch_t scratch;
+        private final boolean owner;
+
+        private JavaCppVectorScratch(hs_scratch_t scratch, boolean owner) {
+            this.scratch = scratch;
+            this.owner = owner;
+        }
+
+        @Override
+        public void close() {
+            if (owner) {
+                checkResult(hyperscan.hs_free_scratch(scratch));
+            }
+        }
     }
 
     private static hs_scratch_t getNativeScratchHandle(com.gliwka.hyperscan.wrapper.Scanner scanner) {
@@ -1978,7 +2507,7 @@ public class JavaCppAdapter implements DualApi {
             return null;
         }
         if (stream instanceof JavaCppStream s) {
-            return s.stream;
+            return s.requireOpen();
         }
         throw new IllegalArgumentException("Unsupported stream type: " + stream.getClass());
     }
@@ -2033,12 +2562,14 @@ public class JavaCppAdapter implements DualApi {
 
     private static String databaseInfo(hs_database_t database) {
         try (PointerPointer<BytePointer> info = new PointerPointer<>(1)) {
-            info.put(0, new BytePointer());
+            info.put(0, (BytePointer) null);
             checkResult(hyperscan.hs_database_info(database, info));
             BytePointer infoPtr = info.get(BytePointer.class);
-            String result = infoPtr.getString();
-            Pointer.free(infoPtr);
-            return result;
+            try {
+                return infoPtr.getString(StandardCharsets.UTF_8);
+            } finally {
+                freeMiscPointer(infoPtr);
+            }
         }
     }
 
@@ -2104,6 +2635,9 @@ public class JavaCppAdapter implements DualApi {
         if (input == null) {
             return new BytePointer();
         }
+        if (STREAM_CALLBACK.get() != null) {
+            return new BytePointer(input);
+        }
         ByteBuffer buffer = getScanBuffer(input);
         BytePointer data = new BytePointer(buffer);
         data.position(buffer.position());
@@ -2151,94 +2685,389 @@ public class JavaCppAdapter implements DualApi {
 
         @Override
         public void close() {
-            database.close();
+            closeDatabaseWhenUnused(this, database::close);
         }
     }
 
-    private record JavaCppNativeDatabase(hs_database_t database, List<DualExpression> expressions) implements DualDatabase {
+    private static final class JavaCppNativeDatabase implements DualDatabase {
+        private hs_database_t database;
+        final List<DualExpression> expressions;
+
+        JavaCppNativeDatabase(hs_database_t database, List<DualExpression> expressions) {
+            this.database = database;
+            this.expressions = expressions;
+        }
+
+        synchronized hs_database_t requireDatabase() {
+            if (database == null || database.isNull()) {
+                throw new IllegalStateException("Database is already closed");
+            }
+            return database;
+        }
+
+        synchronized int free() {
+            return freeDatabaseWhenUnused(this, () -> {
+                if (database == null || database.isNull()) {
+                    return hyperscan.HS_SUCCESS;
+                }
+                int result = hyperscan.hs_free_database(database);
+                if (result == hyperscan.HS_SUCCESS) {
+                    database.setNull();
+                    database = null;
+                }
+                return result;
+            });
+        }
+
         @Override
         public long getSize() {
             try (SizeTPointer size = new SizeTPointer(1)) {
-                checkResult(hyperscan.hs_database_size(database, size));
+                checkResult(hyperscan.hs_database_size(requireDatabase(), size));
                 return size.get();
             }
         }
 
         @Override
         public void close() {
-            checkResult(hyperscan.hs_free_database(database));
+            checkResult(free());
         }
     }
 
-    private record JavaCppRawDatabase(hs_database_t database, Pointer memory, boolean owner) implements DualDatabase {
+    private static final class JavaCppRawDatabaseState {
+        private BytePointer memory;
+
+        JavaCppRawDatabaseState(BytePointer memory) {
+            this.memory = memory;
+        }
+
+        synchronized long address() {
+            if (memory == null || memory.isNull()) {
+                throw new IllegalStateException("Raw database memory is already closed");
+            }
+            return memory.address();
+        }
+
+        synchronized void close() {
+            if (memory == null) {
+                return;
+            }
+            memory.close();
+            memory = null;
+        }
+    }
+
+    private static final class JavaCppRawDatabase implements DualDatabase {
+        private hs_database_t database;
+        final JavaCppRawDatabaseState state;
+        private final boolean owner;
+        private boolean closed;
+
+        JavaCppRawDatabase(hs_database_t database, JavaCppRawDatabaseState state, boolean owner) {
+            this.database = database;
+            this.state = state;
+            this.owner = owner;
+        }
+
+        synchronized hs_database_t requireDatabase() {
+            if (closed || database == null || database.isNull()) {
+                throw new IllegalStateException("Raw database view is already closed");
+            }
+            state.address();
+            return database;
+        }
+
         @Override
         public long getSize() {
             try (SizeTPointer size = new SizeTPointer(1)) {
-                checkResult(hyperscan.hs_database_size(database, size));
+                checkResult(hyperscan.hs_database_size(requireDatabase(), size));
                 return size.get();
             }
         }
 
         @Override
-        public void close() {
-            database.setNull();
+        public synchronized void close() {
+            if (closed) {
+                return;
+            }
             if (owner) {
-                Pointer.free(memory);
+                closeDatabaseWhenUnused(this, state::close);
             }
+            if (database != null) {
+                database.setNull();
+                database = null;
+            }
+            closed = true;
+        }
+    }
+
+    private static final class JavaCppScratchState {
+        private hs_scratch_t scratch;
+
+        JavaCppScratchState(hs_scratch_t scratch) {
+            this.scratch = scratch;
+        }
+
+        synchronized hs_scratch_t require() {
+            if (scratch == null || scratch.isNull()) {
+                throw new IllegalStateException("Scratch space is already closed");
+            }
+            return scratch;
+        }
+
+        synchronized void replace(hs_scratch_t replacement) {
+            scratch = replacement;
+        }
+
+        synchronized boolean isClosed() {
+            return scratch == null || scratch.isNull();
+        }
+
+        synchronized int free() {
+            if (scratch == null || scratch.isNull()) {
+                return hyperscan.HS_SUCCESS;
+            }
+            int result = hyperscan.hs_free_scratch(scratch);
+            if (result == hyperscan.HS_SUCCESS) {
+                scratch.setNull();
+                scratch = null;
+            }
+            return result;
         }
     }
 
     private static final class JavaCppStream implements DualStream {
-        final hs_stream_t stream;
-        final hs_scratch_t scratch;
+        private hs_stream_t stream;
+        final JavaCppScratchState scratchState;
         final List<DualExpression> expressions;
-        boolean closed;
+        final DualDatabase databaseOwner;
+        private boolean closed;
+        private boolean operationInProgress;
+        private boolean leaseReleased;
 
-        JavaCppStream(hs_stream_t stream, hs_scratch_t scratch, List<DualExpression> expressions) {
+        JavaCppStream(hs_stream_t stream, JavaCppScratchState scratchState,
+                      List<DualExpression> expressions, DualDatabase databaseOwner) {
             this.stream = stream;
-            this.scratch = scratch;
+            this.scratchState = scratchState;
             this.expressions = expressions;
+            this.databaseOwner = databaseOwner;
+        }
+
+        hs_scratch_t scratch() {
+            return scratchState == null ? null : scratchState.require();
+        }
+
+        synchronized hs_stream_t requireOpen() {
+            if (closed || stream == null || stream.isNull()) {
+                throw new IllegalStateException("Stream is already closed");
+            }
+            return stream;
+        }
+
+        synchronized hs_stream_t beginOperation() {
+            hs_stream_t current = requireOpen();
+            if (operationInProgress) {
+                throw new IllegalStateException("Stream is in use by an active operation");
+            }
+            operationInProgress = true;
+            return current;
+        }
+
+        synchronized void endOperation() {
+            if (!operationInProgress) {
+                throw new IllegalStateException("Stream operation lease is not held");
+            }
+            operationInProgress = false;
+        }
+
+        synchronized boolean isClosed() {
+            return closed;
+        }
+
+        private void finishCleanup() {
+            RuntimeException failure = null;
+            if (scratchState != null) {
+                try {
+                    checkResult(scratchState.free());
+                } catch (RuntimeException e) {
+                    failure = e;
+                }
+            }
+            if (!leaseReleased) {
+                try {
+                    releaseDatabaseStreamLease(databaseOwner);
+                    leaseReleased = true;
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        synchronized int closeNative(hs_scratch_t callbackScratch, match_event_handler handler,
+                                     boolean invalidWhenClosed) {
+            if (closed) {
+                finishCleanup();
+                return invalidWhenClosed ? hyperscan.HS_INVALID : hyperscan.HS_SUCCESS;
+            }
+            if (operationInProgress) {
+                return hyperscan.HS_INVALID;
+            }
+            operationInProgress = true;
+            try {
+                int result = hyperscan.hs_close_stream(stream, callbackScratch, handler, null);
+                if (result != hyperscan.HS_INVALID && result != hyperscan.HS_SCRATCH_IN_USE) {
+                    closed = true;
+                    if (stream != null) {
+                        stream.setNull();
+                        stream = null;
+                    }
+                    finishCleanup();
+                }
+                return result;
+            } finally {
+                operationInProgress = false;
+            }
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
             if (closed) {
+                finishCleanup();
                 return;
             }
-            closed = true;
-            checkResult(hyperscan.hs_close_stream(stream, scratch, null, null));
-            checkResult(hyperscan.hs_free_scratch(scratch));
+            checkResult(closeNative(scratch(), null, false));
         }
     }
 
-    private record JavaCppScanner(com.gliwka.hyperscan.wrapper.Scanner scanner) implements DualScanner {
+    private static final class JavaCppScanner implements DualScanner {
+        final com.gliwka.hyperscan.wrapper.Scanner scanner;
+        JavaCppScratchState nativeScratch;
+        private boolean closed;
+        private boolean wrapperClosed;
+
+        JavaCppScanner(com.gliwka.hyperscan.wrapper.Scanner scanner) {
+            this.scanner = scanner;
+        }
+
+        synchronized void requireOpen() {
+            if (closed) {
+                throw new IllegalStateException("Scanner is already closed");
+            }
+        }
+
+        synchronized hs_scratch_t ensureNativeScratch(hs_database_t database) {
+            if (closed) {
+                throw new IllegalStateException("Scanner is already closed");
+            }
+            try (PointerPointer<hs_scratch_t> scratchOut = new PointerPointer<>(1)) {
+                scratchOut.put(0, nativeScratch == null ? null : nativeScratch.require());
+                checkResult(hyperscan.hs_alloc_scratch(database, scratchOut));
+                hs_scratch_t scratch = scratchOut.get(hs_scratch_t.class);
+                if (nativeScratch == null) {
+                    nativeScratch = new JavaCppScratchState(scratch);
+                } else {
+                    nativeScratch.replace(scratch);
+                }
+                return scratch;
+            }
+        }
+
+        synchronized hs_scratch_t reusableNativeScratch(hs_database_t database) {
+            requireOpen();
+            return nativeScratch == null ? ensureNativeScratch(database) : nativeScratch.require();
+        }
+
         @Override
-        public long getSize() {
+        public synchronized long getSize() {
+            requireOpen();
+            if (nativeScratch != null) {
+                try (SizeTPointer size = new SizeTPointer(1)) {
+                    checkResult(hyperscan.hs_scratch_size(nativeScratch.require(), size));
+                    return size.get();
+                }
+            }
             return scanner.getSize();
         }
 
         @Override
-        public void close() {
-            try {
-                scanner.close();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+        public synchronized void close() {
+            if (closed && wrapperClosed && (nativeScratch == null || nativeScratch.isClosed())) {
+                return;
+            }
+            closed = true;
+            RuntimeException failure = null;
+            if (!wrapperClosed) {
+                try {
+                    scanner.close();
+                    wrapperClosed = true;
+                } catch (IOException e) {
+                    failure = new RuntimeException(e);
+                }
+            }
+            if (nativeScratch != null) {
+                try {
+                    checkResult(nativeScratch.free());
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
     }
 
-    private record JavaCppRawScanner(hs_scratch_t scratch) implements DualScanner {
+    private static final class JavaCppRawScanner implements DualScanner {
+        private final JavaCppScratchState state;
+        private final boolean owner;
+
+        JavaCppRawScanner(JavaCppScratchState state, boolean owner) {
+            this.state = state;
+            this.owner = owner;
+        }
+
+        hs_scratch_t requireScratch() {
+            return state.require();
+        }
+
+        void replace(hs_scratch_t scratch) {
+            if (!owner) {
+                throw new IllegalStateException("Cannot replace borrowed scratch");
+            }
+            state.replace(scratch);
+        }
+
+        boolean isOwner() {
+            return owner;
+        }
+
+        int free() {
+            return owner ? state.free() : hyperscan.HS_INVALID;
+        }
+
         @Override
         public long getSize() {
             try (SizeTPointer size = new SizeTPointer(1)) {
-                checkResult(hyperscan.hs_scratch_size(scratch, size));
+                checkResult(hyperscan.hs_scratch_size(requireScratch(), size));
                 return size.get();
             }
         }
 
         @Override
         public void close() {
-            checkResult(hyperscan.hs_free_scratch(scratch));
+            if (owner) {
+                checkResult(state.free());
+            }
         }
     }
 

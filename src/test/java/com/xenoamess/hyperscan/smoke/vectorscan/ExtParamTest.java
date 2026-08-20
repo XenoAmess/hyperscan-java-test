@@ -128,7 +128,7 @@ class ExtParamTest {
     public static class ExtParamArgumentsSource implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            return Stream.of(DualImplementation.values())
+            return Stream.of(DualImplementation.functionalValues())
                     .map(impl -> Arguments.of(impl.createAdapter()));
         }
     }

@@ -1,70 +1,81 @@
 package com.xenoamess.hyperscan.smoke.benchmarks.jmh;
 
 import com.xenoamess.hyperscan.smoke.BenchmarkResult;
-import com.xenoamess.hyperscan.smoke.dual.DualExpression;
 import org.openjdk.jmh.results.Result;
 import org.openjdk.jmh.util.Statistics;
-
-import java.util.List;
 
 public final class BenchmarkResultConverter {
 
     private BenchmarkResultConverter() {
     }
 
-    public static BenchmarkResult averageTimeThroughput(String name, Result result, String input,
-                                                        List<DualExpression> expressions, int matches) {
+    public static BenchmarkResult averageTimeThroughput(String name, Result result, long inputBytes,
+                                                        int patterns, Long matchesPerOperation) {
         Statistics stats = result.getStatistics();
         double elapsedMsAvg = stats.getMean();
         double elapsedMsMin = stats.getMin();
         double elapsedMsMax = stats.getMax();
-        int inputBytes = input.length();
         double throughputAvg = inputBytes * 1000.0 / elapsedMsAvg / 1024.0 / 1024.0;
         double throughputMin = inputBytes * 1000.0 / elapsedMsMax / 1024.0 / 1024.0;
         double throughputMax = inputBytes * 1000.0 / elapsedMsMin / 1024.0 / 1024.0;
-        return new BenchmarkResult(name)
-                .metric("patterns", expressions.size())
+        BenchmarkResult benchmark = new BenchmarkResult(name)
+                .metric("patterns", patterns)
                 .metric("inputBytes", inputBytes)
-                .metric("matches", matches)
-                .metric("iterations", stats.getN())
+                .metric("measurementSamples", stats.getN())
                 .metric("elapsedMsAvg", elapsedMsAvg)
                 .metric("elapsedMsMin", elapsedMsMin)
                 .metric("elapsedMsMax", elapsedMsMax)
-                .metric("throughputMBpsAvg", throughputAvg)
-                .metric("throughputMBpsMin", throughputMin)
-                .metric("throughputMBpsMax", throughputMax);
+                .metric("scoreError", result.getScoreError())
+                .metric("scoreUnit", result.getScoreUnit())
+                .metric("throughputMiBpsAvg", throughputAvg)
+                .metric("throughputMiBpsMin", throughputMin)
+                .metric("throughputMiBpsMax", throughputMax);
+        if (matchesPerOperation != null) {
+            benchmark.metric("matchesPerOperation", matchesPerOperation);
+        }
+        return benchmark;
     }
 
-    public static BenchmarkResult singleShotOps(String name, Result result, long totalMatches) {
+    public static BenchmarkResult singleShotOps(String name, Result result, Long matchesPerOperation) {
         Statistics stats = result.getStatistics();
         double elapsedMsPerOp = stats.getMean();
-        long iterations = stats.getN();
-        double totalElapsedMs = elapsedMsPerOp * iterations;
         double opsPerSecond = 1000.0 / elapsedMsPerOp;
         double nsPerOp = elapsedMsPerOp * 1_000_000.0;
-        return new BenchmarkResult(name)
-                .metric("iterations", iterations)
-                .metric("elapsedMs", totalElapsedMs)
+        BenchmarkResult benchmark = new BenchmarkResult(name)
+                .metric("measurementSamples", stats.getN())
+                .metric("elapsedMsPerOperation", elapsedMsPerOp)
                 .metric("opsPerSecond", opsPerSecond)
                 .metric("nsPerOp", nsPerOp)
-                .metric("totalMatches", totalMatches);
+                .metric("scoreError", result.getScoreError())
+                .metric("scoreUnit", result.getScoreUnit());
+        if (matchesPerOperation != null) {
+            benchmark.metric("matchesPerOperation", matchesPerOperation)
+                    .metric("measuredMatches", matchesPerOperation * stats.getN());
+        }
+        return benchmark;
     }
 
     public static BenchmarkResult singleShotCompile(String name, Result result) {
-        return singleShotOps(name, result, 0);
+        return singleShotOps(name, result, null);
     }
 
     public static BenchmarkResult singleShotLarge(String name, Result result, long inputBytes,
-                                                   long matches, int iterations) {
+                                                   Long matchesPerOperation,
+                                                   int operationsPerInvocation) {
         Statistics stats = result.getStatistics();
-        double elapsedMsTotal = stats.getMean();
-        double elapsedMsPerIteration = elapsedMsTotal / iterations;
-        double throughput = inputBytes * iterations * 1000.0 / elapsedMsTotal / 1024.0 / 1024.0;
-        return new BenchmarkResult(name)
+        double elapsedMsPerOperation = stats.getMean();
+        double throughput = inputBytes * 1000.0 / elapsedMsPerOperation / 1024.0 / 1024.0;
+        BenchmarkResult benchmark = new BenchmarkResult(name)
                 .metric("inputBytes", inputBytes)
-                .metric("matches", matches)
-                .metric("iterations", iterations)
-                .metric("elapsedMs", elapsedMsPerIteration)
-                .metric("throughputMBps", throughput);
+                .metric("measurementSamples", stats.getN())
+                .metric("operationsPerInvocation", operationsPerInvocation)
+                .metric("elapsedMsPerOperation", elapsedMsPerOperation)
+                .metric("scoreError", result.getScoreError())
+                .metric("scoreUnit", result.getScoreUnit())
+                .metric("throughputMiBps", throughput);
+        if (matchesPerOperation != null) {
+            benchmark.metric("matchesPerOperation", matchesPerOperation);
+        }
+        return benchmark;
     }
 }

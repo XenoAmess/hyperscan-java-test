@@ -751,7 +751,7 @@ class LogicalCombinationTest {
     public static class LogicalCombinationArgumentsSource implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            return Stream.of(DualImplementation.values())
+            return Stream.of(DualImplementation.functionalValues())
                     .map(impl -> Arguments.of(impl.createAdapter()));
         }
     }

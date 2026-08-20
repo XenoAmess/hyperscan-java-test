@@ -4,6 +4,7 @@ import com.xenoamess.hyperscan.smoke.dual.DualApi;
 import com.xenoamess.hyperscan.smoke.dual.DualExpression;
 import com.xenoamess.hyperscan.smoke.dual.DualExpressionFlag;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -51,14 +52,6 @@ public final class BenchmarkData {
         return sb.toString();
     }
 
-    public static List<DualExpression> buildMixedExpressions(DualApi api, int count) {
-        return buildCrossPlatformExpressions(api, count);
-    }
-
-    public static String buildMixedInput(int size, int seedCount) {
-        return buildCrossPlatformInput(size, seedCount);
-    }
-
     public static List<DualExpression> generateLiteralExpressions(DualApi api, int count) {
         List<DualExpression> expressions = new ArrayList<>(count);
         Random random = new Random(2028);
@@ -79,6 +72,24 @@ public final class BenchmarkData {
             }
         }
         return sb.toString();
+    }
+
+    public static String buildLiteralHaystack(int expressionCount) {
+        Random random = new Random(2028);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < expressionCount; i++) {
+            String literal = "LIT_" + String.format("%08x", random.nextInt());
+            if (i % 5 == 0) {
+                sb.append(literal).append(' ');
+            } else {
+                sb.append("noise_").append(i).append(' ');
+            }
+        }
+        return sb.toString();
+    }
+
+    public static int utf8Length(String input) {
+        return input.getBytes(StandardCharsets.UTF_8).length;
     }
 
     public static String generateLongText(int length) {

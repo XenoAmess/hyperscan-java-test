@@ -7,7 +7,7 @@ from html import escape
 from datetime import datetime, timezone
 
 
-FIXED_WORKLOAD_SCENARIO = 'ISA granularity benchmark'
+FIXED_WORKLOAD_SCENARIO = 'ISA fixed workload (direct buffer)'
 
 
 def load_results(input_dir):
@@ -50,10 +50,13 @@ PLATFORM_ORDER = [
     'linux-x86_64',
     'linux-x86_64-avx2',
     'linux-x86_64-baseline',
+    'linux-x86_64-upstream-auto',
     'linux-arm64',
     'linux-arm64-baseline',
+    'linux-arm64-upstream-auto',
     'windows-x86_64',
     'windows-x86_64-baseline',
+    'windows-x86_64-upstream-auto',
 ]
 
 
@@ -132,25 +135,25 @@ def metric_for(result, scenario_name, key):
 
 
 def throughput_for(result, scenario_name=FIXED_WORKLOAD_SCENARIO):
-    value = metric_for(result, scenario_name, 'throughputMBpsAvg')
+    value = metric_for(result, scenario_name, 'throughputMiBpsAvg')
     if value is None:
-        value = metric_for(result, scenario_name, 'throughputMBps')
-    return float(value or 0.0)
+        value = metric_for(result, scenario_name, 'throughputMiBps')
+    return float(value) if value is not None else None
 
 
 def elapsed_for(result, scenario_name=FIXED_WORKLOAD_SCENARIO):
     value = metric_for(result, scenario_name, 'elapsedMsAvg')
     if value is None:
-        value = metric_for(result, scenario_name, 'elapsedMs')
-    return float(value or 0.0)
+        value = metric_for(result, scenario_name, 'elapsedMsPerOperation')
+    return float(value) if value is not None else None
 
 
 def matches_for(result, scenario_name=FIXED_WORKLOAD_SCENARIO):
-    return metric_for(result, scenario_name, 'matches') or 0
+    return metric_for(result, scenario_name, 'matchesPerOperation')
 
 
 def iterations_for(result, scenario_name):
-    return metric_for(result, scenario_name, 'iterations')
+    return metric_for(result, scenario_name, 'measurementSamples')
 
 
 def ops_per_second_for(result, scenario_name):
@@ -161,10 +164,6 @@ def ns_per_op_for(result, scenario_name):
     return metric_for(result, scenario_name, 'nsPerOp')
 
 
-def total_matches_for(result, scenario_name):
-    return metric_for(result, scenario_name, 'totalMatches')
-
-
 def fixed_workload_scenario(results):
     names = scenario_names(results)
     if FIXED_WORKLOAD_SCENARIO in names:
@@ -172,7 +171,7 @@ def fixed_workload_scenario(results):
     # Fallback: first scenario with throughput data
     for name in names:
         for r in results:
-            if metric_for(r, name, 'throughputMBpsAvg'):
+            if metric_for(r, name, 'throughputMiBpsAvg'):
                 return name
     return names[0] if names else None
 
@@ -189,20 +188,24 @@ def build_platform_summary(results, scenario_name):
         javacpp = impls.get('javacpp')
         panama = impls.get('panama')
         upstream = impls.get('upstream')
-        javacpp_tp = throughput_for(javacpp, scenario_name) if javacpp else 0.0
-        panama_tp = throughput_for(panama, scenario_name) if panama else 0.0
-        upstream_tp = throughput_for(upstream, scenario_name) if upstream else 0.0
+        if javacpp and not find_benchmark(javacpp, scenario_name):
+            javacpp = None
+        if panama and not find_benchmark(panama, scenario_name):
+            panama = None
+        if upstream and not is_unsupported(upstream) and not find_benchmark(upstream, scenario_name):
+            upstream = None
+        javacpp_tp = (throughput_for(javacpp, scenario_name) or 0.0) if javacpp else 0.0
+        panama_tp = (throughput_for(panama, scenario_name) or 0.0) if panama else 0.0
+        upstream_tp = (throughput_for(upstream, scenario_name) or 0.0) if upstream else 0.0
         upstream_unsupported = is_unsupported(upstream) if upstream else False
 
         best_impl = None
         best_tp = 0.0
-        for impl_name, tp in (('javacpp', javacpp_tp), ('panama', panama_tp)):
-            if tp > best_tp:
-                best_impl = impl_name
-                best_tp = tp
-        if upstream and not upstream_unsupported and upstream_tp > best_tp:
-            best_impl = 'upstream'
-            best_tp = upstream_tp
+        if (javacpp and panama and not is_stale(javacpp) and not is_stale(panama)
+                and javacpp_tp > 0 and panama_tp > 0):
+            best_impl, best_tp = max(
+                (('javacpp', javacpp_tp), ('panama', panama_tp)),
+                key=lambda item: item[1])
 
         rows.append({
             'platform': platform,
@@ -237,6 +240,9 @@ def build_scenario_rows(results, scenario_name):
         cpu_display = cpu_model if cpu_model != '-' else cpu_flags
         if cpu_display == '-' or cpu_display == 'unknown':
             cpu_display = '-'
+        benchmark = find_benchmark(r, scenario_name)
+        if not is_unsupported(r) and benchmark is None:
+            continue
         rows.append({
             'platform': platform,
             'implementation': impl,
@@ -252,8 +258,7 @@ def build_scenario_rows(results, scenario_name):
             'matches': matches_for(r, scenario_name),
             'iterations': iterations_for(r, scenario_name),
             'ops_per_second': ops_per_second_for(r, scenario_name),
-            'ns_per_op': ns_per_op_for(r, scenario_name),
-            'total_matches': total_matches_for(r, scenario_name)
+            'ns_per_op': ns_per_op_for(r, scenario_name)
         })
     rows.sort(key=lambda x: (platform_sort_key(x['platform']), 0 if x['implementation'] == 'javacpp' else 1))
     return rows
@@ -262,6 +267,8 @@ def build_scenario_rows(results, scenario_name):
 def build_scenario_chart_rows(results, scenario_name):
     by_platform = {}
     for r in results:
+        if is_stale(r):
+            continue
         platform = safe_get(r, 'platform', default='unknown')
         impl = implementation_for(r)
         by_platform.setdefault(platform, {})[impl] = r
@@ -272,23 +279,28 @@ def build_scenario_chart_rows(results, scenario_name):
         panama = impls.get('panama')
         upstream = impls.get('upstream')
         upstream_unsupported = is_unsupported(upstream) if upstream else False
-        javacpp_tp = throughput_for(javacpp, scenario_name) if javacpp else 0.0
-        panama_tp = throughput_for(panama, scenario_name) if panama else 0.0
-        upstream_tp = throughput_for(upstream, scenario_name) if upstream and not upstream_unsupported else 0.0
-        javacpp_ops = ops_per_second_for(javacpp, scenario_name) or 0.0 if javacpp else 0.0
-        panama_ops = ops_per_second_for(panama, scenario_name) or 0.0 if panama else 0.0
-        upstream_ops = ops_per_second_for(upstream, scenario_name) or 0.0 if upstream and not upstream_unsupported else 0.0
+        javacpp_benchmark = find_benchmark(javacpp, scenario_name) if javacpp else None
+        panama_benchmark = find_benchmark(panama, scenario_name) if panama else None
+        upstream_benchmark = find_benchmark(upstream, scenario_name) if upstream else None
+        javacpp_tp = throughput_for(javacpp, scenario_name) if javacpp_benchmark else None
+        panama_tp = throughput_for(panama, scenario_name) if panama_benchmark else None
+        upstream_tp = (throughput_for(upstream, scenario_name)
+                       if upstream_benchmark and not upstream_unsupported else None)
+        javacpp_ops = ops_per_second_for(javacpp, scenario_name) if javacpp_benchmark else None
+        panama_ops = ops_per_second_for(panama, scenario_name) if panama_benchmark else None
+        upstream_ops = (ops_per_second_for(upstream, scenario_name)
+                        if upstream_benchmark and not upstream_unsupported else None)
 
         metric_type = None
         javacpp_value = 0.0
         panama_value = 0.0
         upstream_value = 0.0
-        if javacpp_tp > 0 or panama_tp > 0 or upstream_tp > 0:
+        if any(value is not None and value > 0 for value in (javacpp_tp, panama_tp, upstream_tp)):
             metric_type = 'throughput'
             javacpp_value = javacpp_tp
             panama_value = panama_tp
             upstream_value = upstream_tp
-        elif javacpp_ops > 0 or panama_ops > 0 or upstream_ops > 0:
+        elif any(value is not None and value > 0 for value in (javacpp_ops, panama_ops, upstream_ops)):
             metric_type = 'ops'
             javacpp_value = javacpp_ops
             panama_value = panama_ops
@@ -313,12 +325,13 @@ def build_scenario_chart_rows(results, scenario_name):
 def render_scenario_chart(html, rows, scenario_name, svg_link=None):
     if not rows:
         return
-    max_value = max(max(r['javacpp'], r['panama'], r['upstream']) for r in rows)
+    max_value = max((value for row in rows for value in
+                     (row['javacpp'], row['panama'], row['upstream']) if value is not None), default=0)
     if max_value <= 0:
         return
 
     metric_type = rows[0]['metric_type']
-    unit = 'MB/s' if metric_type == 'throughput' else 'ops/s'
+    unit = 'MiB/s' if metric_type == 'throughput' else 'ops/s'
     label = 'Throughput' if metric_type == 'throughput' else 'Ops/Second'
 
     html.append(f'    <h4>{escape(label)} Comparison</h4>')
@@ -326,9 +339,9 @@ def render_scenario_chart(html, rows, scenario_name, svg_link=None):
         html.append(f'    <p style="font-size: 0.85rem;"><a href="{escape(svg_link)}">View as SVG</a></p>')
 
     for row in rows:
-        javacpp_width = row['javacpp'] / max_value * 100 if max_value > 0 else 0
-        panama_width = row['panama'] / max_value * 100 if max_value > 0 else 0
-        upstream_width = row['upstream'] / max_value * 100 if max_value > 0 else 0
+        javacpp_width = (row['javacpp'] or 0) / max_value * 100 if max_value > 0 else 0
+        panama_width = (row['panama'] or 0) / max_value * 100 if max_value > 0 else 0
+        upstream_width = (row['upstream'] or 0) / max_value * 100 if max_value > 0 else 0
 
         html.append('    <div style="margin-bottom: 0.75rem;">')
         html.append(f'      <div style="margin-bottom: 0.25rem; font-size: 0.9rem;">{escape(row["platform"])}</div>')
@@ -364,18 +377,9 @@ def generate_html(results, output_file, native_version, commit_sha):
     platform_rows = build_platform_summary(results, fixed_scenario) if fixed_scenario else []
     scenarios = scenario_names(results)
 
-    all_impls = []
-    for row in platform_rows:
-        if row['javacpp']:
-            all_impls.append({'platform': row['platform'], 'implementation': 'javacpp', 'throughput': row['javacppThroughput']})
-        if row['panama']:
-            all_impls.append({'platform': row['platform'], 'implementation': 'panama', 'throughput': row['panamaThroughput']})
-        if row['upstream'] and not row['upstreamUnsupported'] and row['upstreamThroughput'] > 0:
-            all_impls.append({'platform': row['platform'], 'implementation': 'upstream', 'throughput': row['upstreamThroughput']})
-    all_impls.sort(key=lambda x: x['throughput'], reverse=True)
-
-    best = all_impls[0] if all_impls else None
-    worst = all_impls[-1] if all_impls else None
+    current_count = sum(1 for result in results if not is_stale(result) and not is_unsupported(result))
+    stale_count = sum(1 for result in results if is_stale(result))
+    unsupported_count = sum(1 for result in results if is_unsupported(result))
 
     title = 'Hyperscan Java Native Performance Report'
     generated_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
@@ -438,35 +442,33 @@ def generate_html(results, output_file, native_version, commit_sha):
     html.append('    <h2>Executive Summary</h2>')
     html.append('    <div class="summary-grid">')
     html.append('      <div class="summary-item">')
-    html.append('        <div class="label">Best throughput</div>')
-    best_label = f"{best['platform']} ({best['implementation']})" if best else 'N/A'
-    best_throughput = format_num(best['throughput'] if best else None)
-    html.append(f'        <div class="value">{escape(best_label)}</div>')
-    html.append(f'        <div class="label">{best_throughput} MB/s</div>')
+    html.append('        <div class="label">Current result sets</div>')
+    html.append(f'        <div class="value">{current_count}</div>')
+    html.append('        <div class="label">compatible with this run</div>')
     html.append('      </div>')
     html.append('      <div class="summary-item">')
-    html.append('        <div class="label">Worst throughput</div>')
-    worst_label = f"{worst['platform']} ({worst['implementation']})" if worst else 'N/A'
-    worst_throughput = format_num(worst['throughput'] if worst else None)
-    html.append(f'        <div class="value">{escape(worst_label)}</div>')
-    html.append(f'        <div class="label">{worst_throughput} MB/s</div>')
+    html.append('        <div class="label">Compatible stale sets</div>')
+    html.append(f'        <div class="value">{stale_count}</div>')
+    html.append('        <div class="label">excluded from winners</div>')
     html.append('      </div>')
     html.append('      <div class="summary-item">')
-    html.append('        <div class="label">Performance range</div>')
-    if best and worst and worst['throughput'] > 0:
-        ratio = best['throughput'] / worst['throughput']
-    else:
-        ratio = None
-    html.append(f'        <div class="value">{format_num(ratio, 2)}x</div>')
-    html.append('        <div class="label">best vs worst implementation</div>')
+    html.append('        <div class="label">Unsupported sets</div>')
+    html.append(f'        <div class="value">{unsupported_count}</div>')
+    html.append('        <div class="label">reported without synthetic zeros</div>')
     html.append('      </div>')
     html.append('      <div class="summary-item">')
     html.append('        <div class="label">Benchmark workload</div>')
     workload = 'N/A'
-    if results and fixed_scenario:
-        metrics = safe_get(find_benchmark(results[0], fixed_scenario), 'metrics', default={})
+    patterns = 'N/A'
+    input_bytes = 'N/A'
+    measured_samples = 'N/A'
+    workload_result = next((result for result in results
+                            if find_benchmark(result, fixed_scenario)), None) if fixed_scenario else None
+    if workload_result:
+        metrics = safe_get(find_benchmark(workload_result, fixed_scenario), 'metrics', default={})
         patterns = safe_get(metrics, 'patterns', default='N/A')
         input_bytes = safe_get(metrics, 'inputBytes', default='N/A')
+        measured_samples = safe_get(metrics, 'measurementSamples', default='N/A')
         workload = f'{patterns} patterns / {input_bytes} bytes'
     html.append(f'        <div class="value">{escape(workload)}</div>')
     html.append('        <div class="label">per iteration</div>')
@@ -475,20 +477,20 @@ def generate_html(results, output_file, native_version, commit_sha):
 
     # Fixed workload cross-platform comparison table
     html.append(f'    <h2>Fixed Workload Cross-Platform Comparison</h2>')
-    html.append(f'    <p>Same workload used by <a href="https://xenoamess.github.io/hyperscan-java-panama/">hyperscan-java-panama</a>: 500 mixed patterns over ~20 KB of input, 5 measured iterations.</p>')
+    html.append(f'    <p>Same workload used by <a href="https://xenoamess.github.io/hyperscan-java-panama/">hyperscan-java-panama</a>: {escape(str(patterns))} patterns over {escape(str(input_bytes))} bytes, {escape(str(measured_samples))} aggregate measured samples.</p>')
+    html.append('    <p>Rows may come from different hosted VMs and are not ranked against each other. “Faster” and “Speedup” compare only fresh JavaCPP and Panama results from the same matrix job.</p>')
     html.append('    <table>')
     html.append('      <tr>')
-    html.append('        <th>Rank</th>')
     html.append('        <th>Platform</th>')
     html.append('        <th>Runner OS / Arch</th>')
     html.append('        <th>CPU</th>')
-    html.append('        <th>JavaCPP (MB/s)</th>')
-    html.append('        <th>Panama (MB/s)</th>')
-    html.append('        <th>Upstream (MB/s)</th>')
+    html.append('        <th>JavaCPP (MiB/s)</th>')
+    html.append('        <th>Panama (MiB/s)</th>')
+    html.append('        <th>Upstream (MiB/s)</th>')
     html.append('        <th>Faster</th>')
     html.append('        <th>Speedup</th>')
     html.append('      </tr>')
-    for idx, row in enumerate(platform_rows, start=1):
+    for row in platform_rows:
         r = row['results'][0]
         platform = row['platform']
         runner_os = safe_get(r, 'runnerOs', default='-')
@@ -504,20 +506,24 @@ def generate_html(results, output_file, native_version, commit_sha):
         upstream_tp = row['upstreamThroughput']
         faster = row['bestImplementation'] or '-'
 
-        available = sorted([tp for tp in (javacpp_tp, panama_tp, upstream_tp) if tp > 0], reverse=True)
-        speedup = f'{format_num(available[0] / available[1], 2)}x' if len(available) >= 2 else ''
+        comparable = (row['javacpp'] and row['panama']
+                      and not row['javacppStale'] and not row['panamaStale']
+                      and javacpp_tp > 0 and panama_tp > 0)
+        speedup = (f'{format_num(max(javacpp_tp, panama_tp) / min(javacpp_tp, panama_tp), 2)}x'
+                   if comparable else '')
+        faster = row['bestImplementation'] if comparable else '-'
 
         upstream_cell = ('<span style="color:#6a737d;">unsupported</span>' if row['upstreamUnsupported']
                          else escape(format_num(upstream_tp)) + stale_mark(row['upstreamStale']) if row['upstream'] else '-')
 
-        cls = 'best' if best and row['bestThroughput'] == best['throughput'] else ''
-        html.append(f'      <tr class="{cls}">')
-        html.append(f'        <td>{idx}</td>')
+        html.append('      <tr>')
         html.append(f'        <td>{escape(platform)}</td>')
         html.append(f'        <td>{escape(runner_os)} / {escape(runner_arch)}</td>')
         html.append(f'        <td title="{escape(cpu_flags)}">{escape(cpu_display[:60])}</td>')
-        html.append(f'        <td>{escape(format_num(javacpp_tp))}{stale_mark(row["javacppStale"])}</td>')
-        html.append(f'        <td>{escape(format_num(panama_tp))}{stale_mark(row["panamaStale"])}</td>')
+        javacpp_cell = escape(format_num(javacpp_tp)) + stale_mark(row['javacppStale']) if row['javacpp'] else '-'
+        panama_cell = escape(format_num(panama_tp)) + stale_mark(row['panamaStale']) if row['panama'] else '-'
+        html.append(f'        <td>{javacpp_cell}</td>')
+        html.append(f'        <td>{panama_cell}</td>')
         html.append(f'        <td>{upstream_cell}</td>')
         html.append(f'        <td>{escape(faster)}</td>')
         html.append(f'        <td>{escape(speedup)}</td>')
@@ -536,27 +542,34 @@ def generate_html(results, output_file, native_version, commit_sha):
 
     # Throughput chart
     html.append('    <h2>Throughput Comparison</h2>')
-    if best and best['throughput'] > 0:
-        max_tp = best['throughput']
+    current_throughputs = [tp for row in platform_rows for tp, stale in (
+        (row['javacppThroughput'], row['javacppStale']),
+        (row['panamaThroughput'], row['panamaStale']),
+        (row['upstreamThroughput'], row['upstreamStale'])) if tp > 0 and not stale]
+    if current_throughputs:
+        max_tp = max(current_throughputs)
         for row in platform_rows:
+            javacpp_value = None if not row['javacpp'] or row['javacppStale'] else row['javacppThroughput']
+            panama_value = None if not row['panama'] or row['panamaStale'] else row['panamaThroughput']
+            upstream_value = None if not row['upstream'] or row['upstreamStale'] else row['upstreamThroughput']
             html.append('    <div style="margin-bottom: 0.75rem;">')
             html.append(f'      <div style="margin-bottom: 0.25rem; font-size: 0.9rem;">{escape(row["platform"])}</div>')
-            javacpp_width = row['javacppThroughput'] / max_tp * 100 if max_tp > 0 else 0
-            panama_width = row['panamaThroughput'] / max_tp * 100 if max_tp > 0 else 0
-            upstream_width = row['upstreamThroughput'] / max_tp * 100 if max_tp > 0 else 0
+            javacpp_width = (javacpp_value or 0) / max_tp * 100 if max_tp > 0 else 0
+            panama_width = (panama_value or 0) / max_tp * 100 if max_tp > 0 else 0
+            upstream_width = (upstream_value or 0) / max_tp * 100 if max_tp > 0 else 0
             html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">')
             html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">JavaCPP</div>')
             html.append('        <div class="bar-bg" style="flex: 1;">')
             html.append(f'          <div class="bar-fill" style="width: {javacpp_width:.1f}%;"></div>')
             html.append('        </div>')
-            html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["javacppThroughput"]))} MB/s</div>')
+            html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(javacpp_value))} MiB/s</div>')
             html.append('      </div>')
             html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">')
             html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">Panama</div>')
             html.append('        <div class="bar-bg" style="flex: 1;">')
             html.append(f'          <div class="bar-fill" style="width: {panama_width:.1f}%; background: #0969da;"></div>')
             html.append('        </div>')
-            html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["panamaThroughput"]))} MB/s</div>')
+            html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(panama_value))} MiB/s</div>')
             html.append('      </div>')
             html.append(f'      <div style="display: flex; align-items: center; gap: 0.5rem;">')
             html.append(f'        <div style="width: 5rem; font-size: 0.85rem;">Upstream</div>')
@@ -566,7 +579,7 @@ def generate_html(results, output_file, native_version, commit_sha):
                 html.append('        <div class="bar-bg" style="flex: 1;">')
                 html.append(f'          <div class="bar-fill" style="width: {upstream_width:.1f}%; background: #6a737d;"></div>')
                 html.append('        </div>')
-                html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(row["upstreamThroughput"]))} MB/s</div>')
+                html.append(f'        <div style="width: 6rem; text-align: right; font-size: 0.85rem;">{escape(format_num(upstream_value))} MiB/s</div>')
             else:
                 html.append('        <div style="flex: 1; font-size: 0.85rem; color: #6a737d;">-</div>')
             html.append('      </div>')
@@ -586,12 +599,12 @@ def generate_html(results, output_file, native_version, commit_sha):
         html.append('        <th>Runner OS / Arch</th>')
         html.append('        <th>CPU</th>')
         html.append('        <th>Implementation</th>')
-        html.append('        <th>Iterations</th>')
-        html.append('        <th>Elapsed (ms)</th>')
-        html.append('        <th>Throughput (MB/s)</th>')
+        html.append('        <th>Measurement Samples</th>')
+        html.append('        <th>Elapsed (ms/op)</th>')
+        html.append('        <th>Throughput (MiB/s)</th>')
         html.append('        <th>Ops/Second</th>')
         html.append('        <th>ns/Op</th>')
-        html.append('        <th>Total Matches</th>')
+        html.append('        <th>Matches/Op</th>')
         html.append('      </tr>')
         for srow in scenario_rows:
             cls = 'best' if is_scenario_best(srow, scenario_rows) else ''
@@ -609,7 +622,7 @@ def generate_html(results, output_file, native_version, commit_sha):
                 html.append(f'        <td>{escape(format_num(srow["throughput"]))}</td>')
                 html.append(f'        <td>{escape(format_num(srow["ops_per_second"]))}</td>')
                 html.append(f'        <td>{escape(format_num(srow["ns_per_op"]))}</td>')
-                html.append(f'        <td>{escape(format_num(srow["total_matches"], 0))}</td>')
+                html.append(f'        <td>{escape(format_num(srow["matches"], 0))}</td>')
             html.append('      </tr>')
         html.append('    </table>')
 
@@ -622,9 +635,9 @@ def generate_html(results, output_file, native_version, commit_sha):
         html.append('      <table class="sub-table">')
         html.append('        <tr>')
         html.append('          <th>Implementation</th>')
-        html.append('          <th>Throughput (MB/s)</th>')
+        html.append('          <th>Throughput (MiB/s)</th>')
         html.append('          <th>Elapsed (ms)</th>')
-        html.append('          <th>Matches</th>')
+        html.append('          <th>Matches/Op</th>')
         html.append('        </tr>')
         for impl_name in ['javacpp', 'panama', 'upstream']:
             r = row[impl_name] if impl_name in row else None
@@ -648,7 +661,7 @@ def generate_html(results, output_file, native_version, commit_sha):
             html.append(f'          <td><span class="impl-name">{escape(impl_name)}</span>{stale_mark(impl_stale)}{badge}</td>')
             html.append(f'          <td>{escape(format_num(tp))}</td>')
             html.append(f'          <td>{escape(format_num(elapsed))}</td>')
-            html.append(f'          <td>{escape(str(matches))}</td>')
+            html.append(f'          <td>{escape(format_num(matches, 0))}</td>')
             html.append('        </tr>')
             html.append('        <tr>')
             html.append('          <td colspan="4">')
@@ -693,11 +706,19 @@ def generate_html(results, output_file, native_version, commit_sha):
 
 
 def is_scenario_best(srow, scenario_rows):
+    if srow['unsupported'] or srow['stale'] or srow['implementation'] == 'upstream':
+        return False
+    peers = [row for row in scenario_rows
+             if row['platform'] == srow['platform']
+             and row['implementation'] in ('javacpp', 'panama')
+             and not row['unsupported'] and not row['stale']]
+    if len(peers) < 2:
+        return False
     if srow['throughput'] and srow['throughput'] > 0:
-        best = max((r['throughput'] for r in scenario_rows if r['throughput']), default=0)
+        best = max((r['throughput'] for r in peers if r['throughput']), default=0)
         return srow['throughput'] == best
     if srow['ops_per_second'] and srow['ops_per_second'] > 0:
-        best = max((r['ops_per_second'] for r in scenario_rows if r['ops_per_second']), default=0)
+        best = max((r['ops_per_second'] for r in peers if r['ops_per_second']), default=0)
         return srow['ops_per_second'] == best
     return False
 

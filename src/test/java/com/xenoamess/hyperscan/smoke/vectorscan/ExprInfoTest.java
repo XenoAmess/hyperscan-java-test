@@ -164,7 +164,7 @@ class ExprInfoTest {
     public static class ExprInfoArgumentsSource implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            return Stream.of(DualImplementation.values())
+            return Stream.of(DualImplementation.functionalValues())
                     .flatMap(impl -> Stream.of(EXPECTED_INFOS)
                             .map(info -> Arguments.of(impl.createAdapter(), info)));
         }

@@ -308,6 +308,7 @@ class ArgChecksTest {
             int code = api.closeStreamRaw(stream, null, DUMMY);
             assertThat(code).isNotEqualTo(api.success());
         } finally {
+            stream.close();
             db.close();
         }
     }

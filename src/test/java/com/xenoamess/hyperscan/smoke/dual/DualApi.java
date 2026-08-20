@@ -16,6 +16,11 @@ public interface DualApi {
         void free(long address);
     }
 
+    /**
+     * Hyperscan allocator settings are process-global. Reconfigure them only
+     * while no native call is in flight and no allocation from the previous
+     * configuration remains live.
+     */
     void setAllocator(DualAllocator alloc, DualFree free);
 
     void setDatabaseAllocator(DualAllocator alloc, DualFree free);

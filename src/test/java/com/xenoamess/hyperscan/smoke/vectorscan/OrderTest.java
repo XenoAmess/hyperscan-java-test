@@ -143,7 +143,7 @@ class OrderTest {
     public static class OrderArgumentsSource implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            return Stream.of(DualImplementation.values())
+            return Stream.of(DualImplementation.functionalValues())
                     .flatMap(impl -> {
                         DualApi api = impl.createAdapter();
                         List<Case> cases = List.of(ordering1(api), ordering2(api), ordering3(api), ordering4(api));

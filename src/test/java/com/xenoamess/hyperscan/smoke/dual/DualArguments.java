@@ -10,13 +10,13 @@ public final class DualArguments {
     }
 
     public static Stream<Arguments> withStrings(String... values) {
-        return Stream.of(DualImplementation.values())
+        return Stream.of(DualImplementation.functionalValues())
                 .flatMap(impl -> Stream.of(values)
                         .map(value -> Arguments.of(impl.createAdapter(), value)));
     }
 
     public static Stream<Arguments> dualApiOnly() {
-        return Stream.of(DualImplementation.values())
+        return Stream.of(DualImplementation.functionalValues())
                 .map(impl -> Arguments.of(impl.createAdapter()));
     }
 }

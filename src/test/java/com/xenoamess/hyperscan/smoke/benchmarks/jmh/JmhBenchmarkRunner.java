@@ -25,6 +25,9 @@ import java.util.List;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class JmhBenchmarkRunner {
 
+    private static final String BENCHMARK_SUITE_ID = "hyperscan-jmh-v3";
+    private static final int STANDARD_RESULT_COUNT = 9;
+    private static final int LARGE_RESULT_COUNT = 18;
     private static final String IMPLEMENTATION = System.getProperty("hyperscan.benchmark.implementation", "JAVACPP");
     private static final String BENCHMARK_PLATFORM = System.getProperty("benchmark.platform", "unknown");
     private static final String RUNNER_OS = System.getProperty("os.name", "");
@@ -43,11 +46,14 @@ public class JmhBenchmarkRunner {
             // javacpp.platform; without it the forked JVM may auto-detect the
             // bare platform and load the AVX-512 lib on non-AVX-512 hosts.
             jvmArgs.add("-Dorg.bytedeco.javacpp.platform=" + javacppPlatform);
+            if (panamaPlatform.isEmpty()) {
+                jvmArgs.add("-Dcom.xenoamess.hyperscan_panama.platform=" + javacppPlatform);
+            }
         }
         if (!panamaPlatform.isEmpty()) {
             jvmArgs.add("-Dcom.xenoamess.hyperscan_panama.platform=" + panamaPlatform);
         }
-        boolean largeEnabled = Boolean.parseBoolean(System.getProperty("hyperscan.benchmarks.large.enabled", "true"));
+        boolean largeEnabled = Boolean.parseBoolean(System.getProperty("hyperscan.benchmarks.large.enabled", "false"));
         if (largeEnabled) {
             jvmArgs.add("-Dhyperscan.benchmarks.large.enabled=true");
         }
@@ -64,12 +70,20 @@ public class JmhBenchmarkRunner {
             builder.exclude("com\\.xenoamess\\.hyperscan\\.smoke\\.benchmarks\\.jmh\\.large\\..*");
         }
         addProfilers(builder);
+        builder.shouldFailOnError(true);
         Options options = builder.build();
 
         Collection<RunResult> runResults = new Runner(options).run();
         if (runResults.isEmpty()) {
             throw new IllegalStateException(
                     "JMH produced no benchmark results; failing loudly instead of writing an empty report");
+        }
+        if (include == null || include.isEmpty()) {
+            int expectedResults = STANDARD_RESULT_COUNT + (largeEnabled ? LARGE_RESULT_COUNT : 0);
+            if (runResults.size() != expectedResults) {
+                throw new IllegalStateException("JMH produced " + runResults.size()
+                        + " results, expected " + expectedResults);
+            }
         }
 
         List<BenchmarkResult> benchmarkResults = new ArrayList<>();
@@ -96,6 +110,8 @@ public class JmhBenchmarkRunner {
                 benchmarkResults
         );
         recorder.setArtifactVersion(artifactVersionFor(impl));
+        recorder.setActualPlatform(api.getPlatform());
+        recorder.setBenchmarkSuiteId(BENCHMARK_SUITE_ID);
         recorder.write();
     }
 

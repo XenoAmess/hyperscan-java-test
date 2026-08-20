@@ -65,7 +65,11 @@ class MultiTest {
             }
             return handler.matches;
         } finally {
-            api.closeScanner(scanner);
+            try {
+                api.closeScanner(scanner);
+            } finally {
+                api.closeDatabase(db);
+            }
         }
     }
 
@@ -204,7 +208,7 @@ class MultiTest {
     public static class MultiArgumentsSource implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(ExtensionContext context) {
-            return Stream.of(DualImplementation.values())
+            return Stream.of(DualImplementation.functionalValues())
                     .map(impl -> Arguments.of(impl.createAdapter()));
         }
     }

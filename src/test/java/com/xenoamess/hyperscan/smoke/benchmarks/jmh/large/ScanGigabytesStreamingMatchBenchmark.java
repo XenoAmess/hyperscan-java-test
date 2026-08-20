@@ -40,11 +40,11 @@ public class ScanGigabytesStreamingMatchBenchmark {
 
     @State(Scope.Thread)
     public static class BenchmarkState {
-        @Param({"0", "1", "2", "3", "4", "5", "6", "7"})
-        public int caseIndex;
+        @Param({"0:1", "1:1", "2:1", "3:1", "4:1", "5:1", "6:1", "7:1", "0:2"})
+        public String scenario;
 
-        @Param({"1", "2"})
-        public long gigabytes;
+        public int caseIndex;
+        public long gibibytes;
 
         public DualApi api;
         public DualDatabase database;
@@ -56,6 +56,9 @@ public class ScanGigabytesStreamingMatchBenchmark {
 
         @Setup(Level.Iteration)
         public void setUp() {
+            String[] scenarioParts = scenario.split(":", 2);
+            caseIndex = Integer.parseInt(scenarioParts[0]);
+            gibibytes = Long.parseLong(scenarioParts[1]);
             String impl = System.getProperty("hyperscan.benchmark.implementation", "JAVACPP");
             api = DualImplementation.valueOf(impl).createAdapter();
             BehaviourTest.HugeScanCase params = BehaviourTest.GIGABYTE_CASES.get(caseIndex);
@@ -92,7 +95,7 @@ public class ScanGigabytesStreamingMatchBenchmark {
             return true;
         };
         state.api.scanStream(null, state.stream, state.preBlock, handler);
-        long remaining = state.gigabytes * 1024;
+        long remaining = state.gibibytes * 1024;
         while (remaining-- > 0) {
             state.api.scanStream(null, state.stream, state.chunk, handler);
         }
@@ -103,18 +106,17 @@ public class ScanGigabytesStreamingMatchBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.caseIndex = Integer.parseInt(runResult.getParams().getParam("caseIndex"));
-        state.gigabytes = Long.parseLong(runResult.getParams().getParam("gigabytes"));
-        state.setUp();
-        BehaviourTest.HugeScanCase params = BehaviourTest.GIGABYTE_CASES.get(state.caseIndex);
-        long totalBytes = state.preBlock.length + state.gigabytes * 1024L * 1024L * 1024L + state.postBlock.length;
-        String name = "scanGigabytesStreamingMatch_"
+        String[] scenarioParts = runResult.getParams().getParam("scenario").split(":", 2);
+        int caseIndex = Integer.parseInt(scenarioParts[0]);
+        long gibibytes = Long.parseLong(scenarioParts[1]);
+        BehaviourTest.HugeScanCase params = BehaviourTest.GIGABYTE_CASES.get(caseIndex);
+        long totalBytes = params.preBlock().getBytes(StandardCharsets.UTF_8).length
+                + gibibytes * 1024L * 1024L * 1024L
+                + params.postBlock().getBytes(StandardCharsets.UTF_8).length;
+        String name = "scanGibibytesStreamingMatch_"
                 + BenchmarkData.sanitizePattern(params.pattern()) + "_"
-                + state.gigabytes + "GB";
-        BenchmarkResult result = BenchmarkResultConverter.singleShotLarge(
-                name, runResult.getPrimaryResult(), totalBytes, 0, 1);
-        state.tearDown();
-        return result;
+                + gibibytes + "GiB";
+        return BenchmarkResultConverter.singleShotLarge(
+                name, runResult.getPrimaryResult(), totalBytes, null, 1);
     }
 }

@@ -40,7 +40,6 @@ public class ScanShortTextBenchmark {
         public DualScanner scanner;
         public String input;
         public List<DualExpression> expressions;
-        public int matches;
 
         @Setup(Level.Trial)
         public void setUp() {
@@ -55,7 +54,6 @@ public class ScanShortTextBenchmark {
             scanner = api.createScanner();
             api.allocScratch(scanner, database);
             input = "The password is 1234 and the link is https://example.com/path.";
-            matches = api.scan(scanner, database, input).size();
         }
 
         @TearDown(Level.Trial)
@@ -76,11 +74,10 @@ public class ScanShortTextBenchmark {
     }
 
     public static BenchmarkResult toBenchmarkResult(RunResult runResult) {
-        BenchmarkState state = new BenchmarkState();
-        state.setUp();
         BenchmarkResult result = BenchmarkResultConverter.singleShotOps(
-                "scanShortText", runResult.getPrimaryResult(), (long) state.matches * 1000);
-        state.tearDown();
-        return result;
+                "wrapperScanShortText", runResult.getPrimaryResult(), 3L);
+        return result.metric("patterns", 3)
+                .metric("inputBytes", BenchmarkData.utf8Length(
+                        "The password is 1234 and the link is https://example.com/path."));
     }
 }
