@@ -195,14 +195,14 @@ jobs:
 
       - name: Upload test reports
         if: always() && steps.cpu-check.outputs.SKIPPED != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: surefire-reports-${{ matrix.platform }}
           path: target/surefire-reports/
 
       - name: Upload crash logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: smoke-crash-logs-${{ matrix.platform }}
           path: |
@@ -399,7 +399,7 @@ jobs:
 
       - name: Upload benchmark raw result
         if: always() && steps.cpu-check.outputs.SKIPPED != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: benchmark-raw-${{ matrix.platform }}
           path: target/benchmark-results/
@@ -407,7 +407,7 @@ jobs:
 
       - name: Upload crash logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: crash-logs-${{ matrix.platform }}
           path: |
@@ -531,7 +531,7 @@ jobs:
 
       - name: Upload performance report
         if: steps.merge.outputs.count != '0' && steps.merge.outputs.complete == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: performance-report
           path: target/performance-report/
